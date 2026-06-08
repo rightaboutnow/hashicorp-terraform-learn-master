@@ -143,6 +143,46 @@ terraform plan
 
 ---
 
+## First-time deployment checklist
+
+Do these **in order**. The ordering matters: the approval gate isn't active until the GitHub
+Environment exists, so create it before (or immediately after) the first push — otherwise the
+very first run will **apply unattended**.
+
+1. **Provision the Azure side** (one-time) — app/SP, federated credentials, RBAC, state
+   storage. See [github-actions-azure-terraform-oidc.md](github-actions-azure-terraform-oidc.md)
+   and confirm with [VALIDATION.md](VALIDATION.md). Make sure the
+   `repo:<org>/<repo>:environment:production` federated credential exists (see
+   [Prerequisites](#prerequisites)).
+2. **Set the three GitHub Actions variables** — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+   `AZURE_SUBSCRIPTION_ID` (repo → Settings → Secrets and variables → Actions → Variables).
+3. **Create the `production` Environment with a required reviewer** — repo → Settings →
+   Environments → New environment → `production` → enable **Required reviewers** → add
+   yourself → Save. ⚠️ **Skip this and apply runs with no approval.**
+4. **Push the code to `main`** — see [Git commands](#git-commands) below. This starts the
+   first run.
+5. **Watch the run** — init → plan run automatically; the apply job then **pauses** for
+   approval (see [the approval gate](#choosing-whether-to-apply-the-approval-gate)).
+6. **Review the plan, then Approve or Reject** — Approve applies the exact plan; Reject ends
+   the run with no changes.
+
+Quick verification before pushing:
+
+```bash
+# Environment exists with a reviewer (needs gh CLI)
+gh api repos/rightaboutnow/terraform-learn/environments/production \
+  --jq '.name, .protection_rules'
+
+# Actions variables are set
+gh variable list -R rightaboutnow/terraform-learn
+
+# Azure federated credential for the environment exists
+az ad app federated-credential list --id "$APP_ID" \
+  --query "[?contains(subject,'environment:production')].{name:name, subject:subject}" -o table
+```
+
+---
+
 ## Git commands
 
 ### First-time setup — initialize and push
