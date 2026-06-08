@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.76"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "3.9.0"
+    }
   }
 
   # Remote state in Azure Blob Storage.
