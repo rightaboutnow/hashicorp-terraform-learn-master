@@ -1,0 +1,58 @@
+name: Unlock Terraform State
+
+# Manual-only. Breaks the blob lease that the azurerm backend uses to lock
+# terraform.tfstate. Use this ONLY when a run is stuck on "Acquiring state lock"
+# and you've confirmed no run is actively using the state (a cancelled/zombie run
+# left the lease held). Breaking a lease only releases the lock — it does not
+# modify state contents.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "unlock" to confirm you want to break the state lock.'
+        type: string
+        default: ""
+
+permissions:
+  id-token: write   # OIDC token request
+  contents: read
+
+jobs:
+  unlock:
+    name: Break state lease
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation
+        if: inputs.confirm != 'unlock'
+        run: |
+          echo "::error::Set the confirm box to 'unlock' to proceed."
+          exit 1
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Show current lease state
+        run: |
+          az storage blob show \
+            --container-name tfstate --name terraform.tfstate \
+            --account-name tfstate439921213 --auth-mode login \
+            --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state, lastModified:properties.lastModified}" \
+            -o json
+
+      - name: Break the lease
+        run: |
+          az storage blob lease break \
+            --container-name tfstate --blob-name terraform.tfstate \
+            --account-name tfstate439921213 --auth-mode login
+
+      - name: Confirm unlocked
+        run: |
+          az storage blob show \
+            --container-name tfstate --name terraform.tfstate \
+            --account-name tfstate439921213 --auth-mode login \
+            --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state}" \
+            -o json

@@ -50,7 +50,9 @@ jobs:
         run: terraform validate
 
       - name: Terraform Plan
-        run: terraform plan -no-color -out=tfplan
+        # -lock-timeout: wait up to 2 min for the state lock, then fail clearly
+        # instead of hanging forever on a stale lock.
+        run: terraform plan -no-color -lock-timeout=120s -out=tfplan
 
       - name: Upload Plan Artifact
         uses: actions/upload-artifact@v7
@@ -92,4 +94,4 @@ jobs:
           name: tfplan
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -lock-timeout=120s -auto-approve tfplan

@@ -276,6 +276,52 @@ gh run watch  -R rightaboutnow/terraform-learn
 
 ---
 
+## Troubleshooting
+
+### Run hangs on "Acquiring state lock. This may take a few moments…"
+
+The `azurerm` backend locks state by holding a **blob lease** on `terraform.tfstate`. If a run
+is **cancelled mid-`init`/`plan`/`apply`**, Terraform never releases the lease, so the next run
+blocks forever waiting for a lock no live process owns.
+
+**Check the lease:**
+
+```bash
+az storage blob show --container-name tfstate --name terraform.tfstate \
+  --account-name tfstate439921213 --auth-mode login \
+  --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state, lastModified:properties.lastModified}" -o json
+```
+
+`leaseState: leased` / `leaseStatus: locked` with no run actively using it = stale lock.
+
+**Break it** (only releases the lock — does not modify state contents):
+
+```bash
+az storage blob lease break --container-name tfstate --blob-name terraform.tfstate \
+  --account-name tfstate439921213 --auth-mode login
+```
+
+**Or from GitHub** (no local `az` needed): run the **Unlock Terraform State** workflow
+([.github/workflows/unlock-state.yml](.github/workflows/unlock-state.yml)) — Actions → *Unlock
+Terraform State* → Run workflow → set **confirm** = `unlock`. It shows the lease state, breaks
+it, and confirms it's unlocked.
+
+Alternatively, if you have the lock ID from Terraform's error message:
+`terraform force-unlock <LOCK_ID>` (run locally against the same backend).
+
+Then **cancel the stuck GitHub run and re-run it** — it will acquire the now-free lock
+immediately. (The management-plane `az` commands above are not affected by the lock, so you can
+always run them.)
+
+> The pipeline also passes `-lock-timeout=120s` to `plan`/`apply`, so a stale lock makes a run
+> **fail after 2 minutes** with a clear error instead of hanging indefinitely.
+
+> Prevention: avoid cancelling a run while it's mid-Terraform. The workflow's
+> `concurrency: cancel-in-progress: false` queues overlapping runs rather than killing them, so
+> a stuck run holds up the queue until the lock is cleared.
+
+---
+
 ## Security properties
 
 - **No secrets stored** — client/tenant/subscription IDs are non-sensitive identifiers.
