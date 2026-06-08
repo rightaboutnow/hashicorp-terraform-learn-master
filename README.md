@@ -18,7 +18,7 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 | [main.tf](main.tf) | Your Azure resources (skeleton — add as you learn) |
 | [variables.tf](variables.tf) | Input variables (location, resource group name, tags) |
 | [outputs.tf](outputs.tf) | Output values (skeleton) |
-| [.github/workflows/terraform.yml](.github/workflows/terraform.yml) | CI/CD pipeline: init → plan → apply |
+| [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) | CI/CD pipeline: init → plan → apply |
 | [.gitignore](.gitignore) | Excludes `.terraform/`, state, plan, and `*.tfvars` |
 | [.terraform.lock.hcl](.terraform.lock.hcl) | Provider dependency lock (committed) |
 | [github-actions-azure-terraform-oidc.md](github-actions-azure-terraform-oidc.md) | One-time Azure/GitHub setup guide |
@@ -42,7 +42,7 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 
 ## How the pipeline works
 
-[.github/workflows/terraform.yml](.github/workflows/terraform.yml) runs two jobs on every
+[.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) runs two jobs on every
 push to `main`:
 
 1. **Plan** — `terraform init`, `fmt -check`, `validate`, then `terraform plan`; uploads the
@@ -256,6 +256,37 @@ git pull --rebase            # sync with remote before pushing
 git restore <file>           # discard local changes to a file
 git restore --staged <file>  # unstage a file
 ```
+
+---
+
+## Destroying resources (manual only)
+
+A separate, manual-only workflow tears down **everything** in the Terraform state:
+[.github/workflows/terraform-destroy.yml](.github/workflows/terraform-destroy.yml). It never runs on push — it's
+`workflow_dispatch` only and mirrors the deploy pipeline's **plan → approve → apply** shape so
+the teardown is reviewable, with two jobs:
+
+1. **Plan Destroy** — requires you to type `destroy` in the **confirm** box (aborts otherwise),
+   then runs `terraform plan -destroy` and uploads the destroy plan. Its log lists **exactly
+   which resources will be destroyed**.
+2. **Destroy** — targets the **`production`** environment, so the run **pauses for
+   required-reviewer approval** after the destroy plan. Approving applies that exact plan;
+   rejecting stops with nothing destroyed.
+
+So it's **double-gated**: the `destroy` confirm word *and* the environment approval — and the
+approver reviews the destroy plan before clicking Approve.
+
+**Run it:** Actions → **Terraform Destroy** → Run workflow → branch `main` → set **confirm** =
+`destroy` → Run → review the **Plan Destroy** output → **Approve** when it pauses.
+
+```bash
+# Or via the GitHub CLI
+gh workflow run terraform-destroy.yml -R rightaboutnow/terraform-learn --ref main -f confirm=destroy
+```
+
+It shares the deploy pipeline's `concurrency` group, so it can't run while an apply/plan is in
+flight (it queues behind it). ⚠️ Irreversible — it deletes all resources this state manages, but
+**not** the state storage account itself (that's bootstrapped outside Terraform).
 
 ---
 

@@ -195,7 +195,7 @@ provider "azurerm" {
 
 ## Step 7: GitHub Actions Workflow (plan → apply)
 
-The pipeline lives in [.github/workflows/terraform.yml](.github/workflows/terraform.yml) — that
+The pipeline lives in [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) — that
 file is the single source of truth; this section just summarizes it. It has **two jobs**:
 
 1. **Plan** — checkout → Azure OIDC login → `terraform init`, `fmt -check`, `validate`, then

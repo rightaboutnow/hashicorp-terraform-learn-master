@@ -1,0 +1,106 @@
+name: Terraform Destroy
+
+# Manual-only. Tears down ALL resources managed by this Terraform state.
+# Flow mirrors the deploy pipeline so the destruction is reviewable:
+#   plan-destroy  →  (production approval — reviewer sees exactly what will be destroyed)  →  apply
+# Double-gated: you must type the confirm word AND approve the 'production'
+# environment before any resource is destroyed.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm you want to destroy all managed resources.'
+        type: string
+        default: ""
+
+# Share the deploy pipeline's concurrency slot so destroy can't run while an
+# apply/plan run is in flight (it queues behind it).
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # Required for OIDC token request
+  contents: read
+
+env:
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  ARM_USE_OIDC: "true"
+
+jobs:
+  # ── 1. PLAN DESTROY (no approval; produces a reviewable destroy plan) ──
+  plan-destroy:
+    name: Plan Destroy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation
+        if: inputs.confirm != 'destroy'
+        run: |
+          echo "::error::Set the confirm box to 'destroy' to proceed. Aborting — nothing planned."
+          exit 1
+
+      - uses: actions/checkout@v6
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.15"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan (destroy)
+        # Review THIS step's output before approving — it lists every resource
+        # that will be destroyed.
+        run: terraform plan -destroy -no-color -lock-timeout=120s -out=tfdestroy
+
+      - name: Upload Destroy Plan Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfdestroy
+          path: tfdestroy
+          retention-days: 5
+
+  # ── 2. DESTROY (waits for manual approval via the environment) ──
+  destroy:
+    name: Destroy
+    runs-on: ubuntu-latest
+    needs: plan-destroy
+    # The 'production' environment has a required reviewer, so this run pauses
+    # here after the destroy plan and waits for Approve/Reject — no re-run needed.
+    # Approving applies the exact destroy plan produced above.
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.15"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download Destroy Plan Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: tfdestroy
+
+      - name: Terraform Apply (destroy plan)
+        run: terraform apply -no-color -lock-timeout=120s tfdestroy
