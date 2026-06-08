@@ -1,0 +1,26 @@
+# Local .terraform directories
+.terraform/
+
+# .tfstate files (state lives in the remote azurerm backend)
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Saved plan output (passed between jobs as a CI artifact, never committed)
+tfplan
+*.tfplan
+
+# Variable files that may contain secrets
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# CLI configuration files
+.terraformrc
+terraform.rc
+
+# Keep the dependency lock file under version control:
+# .terraform.lock.hcl is intentionally NOT ignored.
