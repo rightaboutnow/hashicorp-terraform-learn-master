@@ -16,7 +16,7 @@ variable "resource_group_name" {
 variable "application_name" {
   description = "Name of application"
   type        = string
-  default     = "runtimefun"
+  default     = "learnapp"
 }
 
 variable "environment_name" {
@@ -29,7 +29,9 @@ variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)
   default = {
-    environment = "learning"
+    environment = "{var.environment_name}"
     managed_by  = "terraform"
+    application = "{var.application_name}"
+    email       = "Jenson Thomas"
   }
 }
