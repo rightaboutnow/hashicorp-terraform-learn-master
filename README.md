@@ -42,18 +42,19 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 
 ## How the pipeline works
 
-[.github/workflows/terraform.yml](.github/workflows/terraform.yml) runs three jobs on every
+[.github/workflows/terraform.yml](.github/workflows/terraform.yml) runs two jobs on every
 push to `main`:
 
-1. **Init & Validate** — `terraform init`, `fmt -check`, `validate`
-2. **Plan** — `terraform plan` and uploads the plan as a CI artifact
-3. **Apply** — *waits for manual approval.* The job targets the **`production`**
+1. **Plan** — `terraform init`, `fmt -check`, `validate`, then `terraform plan`; uploads the
+   plan as a CI artifact. (Init, validation, and plan are combined into one job since they're
+   sequential and share state — one runner, one `init`.)
+2. **Apply** — *waits for manual approval.* The job targets the **`production`**
    environment, which has a required reviewer. The run **pauses after plan** and waits for an
    **Approve / Reject** click. Approving applies the exact plan from the Plan job; rejecting
    ends the run without changes — **no re-run needed either way**.
 
-Each job runs `terraform init` on a fresh runner; the saved plan is passed from Plan → Apply
-as an artifact so apply executes exactly what was reviewed.
+Apply runs on a fresh runner, so it re-runs `terraform init`; the saved plan is passed from
+Plan → Apply as an artifact so apply executes exactly what was reviewed.
 
 ### Choosing whether to apply (the approval gate)
 
@@ -81,7 +82,7 @@ The Azure/GitHub trust must be provisioned once before the pipeline can run — 
 
 - An Azure AD **app registration** + **service principal** (`github-actions-terraform`)
 - **Federated credentials** trusting these OIDC subjects:
-  - `repo:<org>/<repo>:ref:refs/heads/main` — used by the init/plan jobs (and push)
+  - `repo:<org>/<repo>:ref:refs/heads/main` — used by the plan job (and push)
   - `repo:<org>/<repo>:environment:production` — used by the **apply** job (the environment
     changes the token subject; without this credential apply's Azure login fails)
   - `repo:<org>/<repo>:pull_request` — optional, for plan-only PR runs

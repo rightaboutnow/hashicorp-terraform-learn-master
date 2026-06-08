@@ -1,0 +1,13 @@
+{
+  // Format Terraform files on save with the HashiCorp extension (terraform fmt).
+  // Keeps files matching the `terraform fmt -check` step in CI so the pipeline
+  // never fails on formatting.
+  "[terraform]": {
+    "editor.defaultFormatter": "hashicorp.terraform",
+    "editor.formatOnSave": true
+  },
+  "[terraform-vars]": {
+    "editor.defaultFormatter": "hashicorp.terraform",
+    "editor.formatOnSave": true
+  }
+}

@@ -13,6 +13,18 @@ variable "resource_group_name" {
   default     = "learn-rg"
 }
 
+variable "application_name" {
+  description = "Name of application"
+  type        = string
+  default     = "runtimefun"
+}
+
+variable "environment_name" {
+  description = "Name of environment"
+  type        = string
+  default     = "test"
+}
+
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)

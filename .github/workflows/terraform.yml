@@ -21,9 +21,9 @@ env:
   ARM_USE_OIDC: "true"
 
 jobs:
-  # ── 1. INIT ──────────────────────────────────────────────
-  init:
-    name: Init & Validate
+  # ── 1. PLAN (init + validate + plan in one job) ──────────
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -49,29 +49,6 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-  # ── 2. PLAN ──────────────────────────────────────────────
-  plan:
-    name: Plan
-    runs-on: ubuntu-latest
-    needs: init
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.15"
-
-      - name: Terraform Init
-        run: terraform init
-
       - name: Terraform Plan
         run: terraform plan -no-color -out=tfplan
 
@@ -82,7 +59,7 @@ jobs:
           path: tfplan
           retention-days: 5
 
-  # ── 3. APPLY (waits for manual approval via the environment) ──
+  # ── 2. APPLY (waits for manual approval via the environment) ──
   apply:
     name: Apply
     runs-on: ubuntu-latest

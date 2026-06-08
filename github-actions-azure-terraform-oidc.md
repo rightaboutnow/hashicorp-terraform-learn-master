@@ -193,134 +193,23 @@ provider "azurerm" {
 
 ---
 
-## Step 7: GitHub Actions Workflow (init → plan → apply)
+## Step 7: GitHub Actions Workflow (plan → apply)
 
-Three separate jobs. On every push to `main`, **init** and **plan** run automatically (a preview — no changes applied). **apply** is manual: it only runs when you click **Run workflow** in the Actions tab (`workflow_dispatch`), and is skipped on ordinary pushes.
+The pipeline lives in [.github/workflows/terraform.yml](.github/workflows/terraform.yml) — that
+file is the single source of truth; this section just summarizes it. It has **two jobs**:
 
-This keeps the manual gate without GitHub Environments, so the OIDC subject stays `repo:<org>/<repo>:ref:refs/heads/main` and matches your existing `github-main` federated credential — no extra credential needed.
+1. **Plan** — checkout → Azure OIDC login → `terraform init`, `fmt -check`, `validate`, then
+   `terraform plan -out=tfplan`, and uploads `tfplan` as an artifact. (Init/validate/plan are
+   one job since they're sequential and share state.) Runs automatically on every push to
+   `main` and on manual **Run workflow**.
+2. **Apply** — `needs: plan`, targets the **`production`** GitHub Environment, and downloads
+   the `tfplan` artifact to run `terraform apply tfplan`.
 
-> **Apply approval gate:** the apply job targets a `production` GitHub Environment with a required reviewer. Every run does init → plan, then **pauses** at apply. Open the run → **Review deployments** → **Approve and deploy** to apply the plan just generated, or **Reject** to stop — no re-run needed. This requires a one-time `production` environment (with you as reviewer) and a matching Azure federated credential for subject `repo:<org>/<repo>:environment:production`. See [README.md](README.md#choosing-whether-to-apply-the-approval-gate) for details.
+> **Apply approval gate:** the apply job targets a `production` GitHub Environment with a required reviewer. Every run does plan, then **pauses** at apply. Open the run → **Review deployments** → **Approve and deploy** to apply the plan just generated, or **Reject** to stop — no re-run needed. This requires a one-time `production` environment (with you as reviewer) and a matching Azure federated credential for subject `repo:<org>/<repo>:environment:production`. See [README.md](README.md#choosing-whether-to-apply-the-approval-gate) for details.
 
-```yaml
-# .github/workflows/terraform.yml
-name: Terraform
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:   # manual "Run workflow" button → enables the apply job
-
-# Cancel superseded runs on the same branch
-concurrency:
-  group: terraform-${{ github.ref }}
-  cancel-in-progress: false
-
-permissions:
-  id-token: write   # Required for OIDC token request
-  contents: read
-
-env:
-  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-  ARM_USE_OIDC: "true"
-
-jobs:
-  # ── 1. INIT ──────────────────────────────────────────────
-  init:
-    name: Init & Validate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.15"
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Format Check
-        run: terraform fmt -check
-
-      - name: Terraform Validate
-        run: terraform validate
-
-  # ── 2. PLAN ──────────────────────────────────────────────
-  plan:
-    name: Plan
-    runs-on: ubuntu-latest
-    needs: init
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.15"
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Plan
-        run: terraform plan -no-color -out=tfplan
-
-      - name: Upload Plan Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tfplan
-          path: tfplan
-          retention-days: 5
-
-  # ── 3. APPLY (manual: only runs on workflow_dispatch) ────
-  apply:
-    name: Apply
-    runs-on: ubuntu-latest
-    needs: plan
-    if: github.event_name == 'workflow_dispatch'   # skipped on push; runs only when manually triggered
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.15"
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Download Plan Artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: tfplan
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
-```
-
-> **Why each job runs `terraform init`:** each GitHub job runs on a fresh runner, so the `.terraform` provider cache and backend config don't carry over. The `tfplan` file is passed from **plan → apply** as an artifact, so apply executes exactly the plan you reviewed.
+> **Why apply re-runs `terraform init`:** it runs on a fresh runner, so the `.terraform`
+> provider cache and backend config don't carry over from the plan job. The `tfplan` file is
+> passed from **plan → apply** as an artifact, so apply executes exactly the plan you reviewed.
 
 ---
 
