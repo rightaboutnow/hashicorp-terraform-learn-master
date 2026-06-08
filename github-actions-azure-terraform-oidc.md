@@ -199,7 +199,7 @@ Three separate jobs. On every push to `main`, **init** and **plan** run automati
 
 This keeps the manual gate without GitHub Environments, so the OIDC subject stays `repo:<org>/<repo>:ref:refs/heads/main` and matches your existing `github-main` federated credential — no extra credential needed.
 
-> **Manual apply:** GitHub → **Actions** → select the **Terraform** workflow → **Run workflow** → choose branch `main` → Run. That triggers init → plan → **apply** in one run, applying exactly the plan it just generated.
+> **Manual apply:** GitHub → **Actions** → select the **Terraform** workflow → **Run workflow** → choose branch `main`, set **action** = `apply` and the **confirm** box to `apply` → Run. That triggers init → plan → **apply** in one run, applying exactly the plan it just generated. Leaving **action** = `plan` (the default), or not typing `apply` in **confirm**, runs init + plan only and changes nothing. See [README.md](README.md#triggering-a-manual-apply) for details.
 
 ```yaml
 # .github/workflows/terraform.yml
