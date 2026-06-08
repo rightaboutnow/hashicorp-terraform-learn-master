@@ -199,7 +199,7 @@ Three separate jobs. On every push to `main`, **init** and **plan** run automati
 
 This keeps the manual gate without GitHub Environments, so the OIDC subject stays `repo:<org>/<repo>:ref:refs/heads/main` and matches your existing `github-main` federated credential — no extra credential needed.
 
-> **Manual apply:** GitHub → **Actions** → select the **Terraform** workflow → **Run workflow** → choose branch `main`, set **action** = `apply` and the **confirm** box to `apply` → Run. That triggers init → plan → **apply** in one run, applying exactly the plan it just generated. Leaving **action** = `plan` (the default), or not typing `apply` in **confirm**, runs init + plan only and changes nothing. See [README.md](README.md#triggering-a-manual-apply) for details.
+> **Apply approval gate:** the apply job targets a `production` GitHub Environment with a required reviewer. Every run does init → plan, then **pauses** at apply. Open the run → **Review deployments** → **Approve and deploy** to apply the plan just generated, or **Reject** to stop — no re-run needed. This requires a one-time `production` environment (with you as reviewer) and a matching Azure federated credential for subject `repo:<org>/<repo>:environment:production`. See [README.md](README.md#choosing-whether-to-apply-the-approval-gate) for details.
 
 ```yaml
 # .github/workflows/terraform.yml
