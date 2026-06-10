@@ -23,7 +23,8 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 | [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) | Deploy: pick env → plan → approve → apply |
 | [.github/workflows/terraform-destroy.yml](.github/workflows/terraform-destroy.yml) | Manual teardown of a chosen environment |
 | [.github/workflows/unlock-state.yml](.github/workflows/unlock-state.yml) | Break a stuck state lock for a chosen environment |
-| [SETUP.md](SETUP.md) | One-time Azure/GitHub setup guide |
+| [scripts/bootstrap.sh](scripts/bootstrap.sh) | One-time, idempotent bootstrap of all prerequisites |
+| [SETUP.md](SETUP.md) | Run the bootstrap + how the setup works (architecture) |
 | [VALIDATION.md](VALIDATION.md) | Commands to validate the whole setup |
 | [CLAUDE.md](CLAUDE.md) | Architecture & conventions guide for AI agents |
 
@@ -90,8 +91,10 @@ gh workflow run terraform-apply.yml -R rightaboutnow/terraform-learn --ref main 
 
 ## Prerequisites
 
-The Azure/GitHub trust is provisioned once — full steps in
-[SETUP.md](SETUP.md). In short:
+The Azure/GitHub trust is provisioned **once** by running
+[scripts/bootstrap.sh](scripts/bootstrap.sh) — see [SETUP.md](SETUP.md). It creates all
+of the below idempotently. ([SETUP.md](SETUP.md) explains what each piece is and why.) In short,
+the setup consists of:
 
 - An Azure AD **app registration** + **service principal** (`github-actions-terraform`)
 - **Federated credentials** trusting these OIDC subjects (all created for this project):
@@ -110,24 +113,8 @@ The Azure/GitHub trust is provisioned once — full steps in
 - **GitHub Environments** named `dev`, `test`, `prod`. Add a **required reviewer** to the ones
   you want gated (at minimum `prod`).
 
-### Create the GitHub Environments
-
-**UI:** repo → **Settings** → **Environments** → **New environment** → name it `dev` / `test` /
-`prod` → (for gated envs) enable **Required reviewers** → add yourself → **Save**.
-
-**gh CLI** (required reviewer on prod; repeat per env as desired):
-
-```bash
-# numeric user id: gh api user --jq .id
-gh api -X PUT repos/rightaboutnow/terraform-learn/environments/prod \
-  -f "reviewers[][type]=User" -F "reviewers[][id]=USER_ID"
-
-# dev/test with no reviewer (auto-apply after plan) — just create them:
-gh api -X PUT repos/rightaboutnow/terraform-learn/environments/dev
-gh api -X PUT repos/rightaboutnow/terraform-learn/environments/test
-```
-
-The matching Azure federated credentials (`github-env-dev/test/prod`) already exist — verify
+`scripts/bootstrap.sh` creates the GitHub Environments (and sets the prod reviewer from
+`PROD_REVIEWERS`) along with the federated credentials and variables. Verify the whole setup
 with [VALIDATION.md](VALIDATION.md).
 
 ---
@@ -152,37 +139,74 @@ terraform plan -var-file="environments/dev.tfvars"
 
 ---
 
-## First-time deployment checklist
+## Getting started (step by step)
 
-Do these **in order**:
+A one-time bootstrap provisions all the Azure/GitHub prerequisites, then deploys are run from
+the Actions tab. Full details and the variable reference are in [SETUP.md](SETUP.md).
 
-1. **Provision the Azure side** (one-time) — app/SP, the four federated credentials, RBAC,
-   state storage. See [SETUP.md](SETUP.md)
-   and confirm with [VALIDATION.md](VALIDATION.md).
-2. **Set the three GitHub Actions variables** — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-   `AZURE_SUBSCRIPTION_ID` (repo → Settings → Secrets and variables → Actions → Variables).
-3. **Create the `dev`, `test`, `prod` GitHub Environments** — add a required reviewer to at
-   least `prod`. ⚠️ An environment with no reviewer applies without pausing.
-4. **Push the code to `main`** — see [Git commands](#git-commands). Pushing does **not** deploy;
-   deploys are manual.
-5. **Run Terraform Apply** for `dev` first — Actions → Terraform Apply → Run workflow →
-   `environment=dev` → review plan → approve if gated.
-6. **Promote** to `test`, then `prod`, the same way.
-
-Quick verification before the first run:
+### 1. Install + authenticate the tools
 
 ```bash
-# Environments exist (and which are gated)
-for e in dev test prod; do
-  gh api repos/rightaboutnow/terraform-learn/environments/$e --jq '.name, .protection_rules' ; done
-
-# Actions variables are set
-gh variable list -R rightaboutnow/terraform-learn
-
-# Per-environment federated credentials exist
-az ad app federated-credential list --id "$APP_ID" \
-  --query "[?starts_with(subject,'repo:rightaboutnow/terraform-learn:environment:')].{name:name, subject:subject}" -o table
+# Terraform, Azure CLI, GitHub CLI must be installed, then:
+az login        # as a user who can create Entra app registrations AND assign roles
+                # (Application Administrator + Owner / User Access Administrator)
+gh auth login   # with repo-admin rights
 ```
+
+### 2. Create the GitHub repo (manually)
+
+Create the empty repository on GitHub (e.g. `your-org/your-repo`). This is the only manual
+GitHub step — the bootstrap configures everything inside it.
+
+### 3. Configure the bootstrap
+
+Edit [scripts/bootstrap.env](scripts/bootstrap.env) — only two values are required:
+
+```bash
+export GITHUB_OWNER="your-org"
+export GITHUB_REPO="your-repo"
+```
+
+Strongly recommended: also set a prod reviewer (inline or in the file), or `prod` deploys
+without pausing for approval:
+
+```bash
+export PROD_REVIEWERS="your-github-username"
+```
+
+Everything else (app name, subscription, location, env list, state storage names) has a default
+— see the variable table in [SETUP.md](SETUP.md#2-configure).
+
+### 4. Run the bootstrap
+
+```bash
+./scripts/bootstrap.sh
+```
+
+Idempotently creates: the **Azure AD app + service principal**, **federated credentials**
+(`github-main` + `github-env-<env>`), **RBAC** (Contributor, User Access Administrator, Storage
+Blob Data Contributor at subscription scope), **state storage** (RG + account + container),
+**GitHub Actions variables** (`AZURE_*` + `TFSTATE_*`), and the **`dev`/`test`/`prod`
+environments** (with the prod reviewer). Re-running is safe — existing resources are skipped.
+
+### 5. Point the backend at the state account
+
+Make sure the `backend "azurerm"` block in [versions.tf](versions.tf) matches the storage
+account the bootstrap created/reused (`storage_account_name`, `resource_group_name`,
+`container_name`). The bootstrap also stores these as the `TFSTATE_*` Actions variables.
+
+### 6. Push the code to `main`
+
+See [Git commands](#git-commands). Pushing does **not** deploy — deploys are manual.
+
+### 7. Verify (optional)
+
+Run through [VALIDATION.md](VALIDATION.md) to confirm everything landed.
+
+### 8. Deploy
+
+**Actions** → **Terraform Apply** → **Run workflow** → `environment=dev` → review the Plan job →
+**Approve** the Apply job if the environment gates it. Then promote to `test`, then `prod`.
 
 ---
 

@@ -1,279 +1,179 @@
-# GitHub Actions + Azure Terraform with OIDC (Workload Identity Federation)
+# Setup — GitHub Actions + Azure Terraform with OIDC
 
-## Architecture Overview
+How to provision this setup and how it works. Provisioning is automated by
+[scripts/bootstrap.sh](scripts/bootstrap.sh); this doc covers running it and explains what it
+builds and why. To verify a provisioned setup, see [VALIDATION.md](VALIDATION.md).
 
 ```
 GitHub Actions → OIDC JWT token → Azure AD validates → short-lived access token → Azure APIs
 ```
 
-No client secrets or certificates stored in GitHub.
+No client secrets or storage keys are stored anywhere.
+
+## Two layers
+
+| Layer | Creates | Auth | Run |
+|---|---|---|---|
+| **Bootstrap** (this doc) | Azure AD app, federated creds, RBAC, state storage, GitHub variables + environments | A human's privileged `az`/`gh` login | **Once** per (repo, subscription) |
+| **Deploy** (the workflows) | Your actual infra, per environment | OIDC, no secrets | Every change |
+
+The bootstrap can't run in the pipeline — it *creates* the OIDC trust the pipeline
+authenticates with. It's idempotent, so re-running is safe.
 
 ---
 
-## Step 1: Create an Azure AD App Registration
+## Quick start
+
+### 1. Prerequisites
+
+The bootstrap needs privileged "first credentials" (it creates app registrations and assigns
+roles — unavoidable):
+
+- **Azure CLI** logged in as a user who can create Entra app registrations and assign roles
+  (Application Administrator + Owner / User Access Administrator): `az login`
+- **GitHub CLI** authenticated with repo-admin rights: `gh auth login`
+- **The GitHub repo already exists** (create it manually first).
+
+### 2. Configure
+
+Put the two required values in [scripts/bootstrap.env](scripts/bootstrap.env) (auto-sourced):
 
 ```bash
-# Create the app registration
-az ad app create --display-name "github-actions-terraform"
-
-# Note the appId (client ID) from output
-APP_ID=$(az ad app list --display-name "github-actions-terraform" --query "[0].appId" -o tsv)
-
-# Create a service principal for it
-az ad sp create --id $APP_ID
-SP_OBJECT_ID=$(az ad sp show --id $APP_ID --query id -o tsv)
+export GITHUB_OWNER="rightaboutnow"     # org/user that owns the repo
+export GITHUB_REPO="terraform-learn"    # repo name (must already exist)
 ```
+
+Everything else has a default — override any of these inline or in `bootstrap.env`:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `GITHUB_OWNER` / `GITHUB_REPO` | — | **required** |
+| `PROD_REVIEWERS` | *(empty)* | GitHub usernames for the prod approval gate. **Empty → prod has no reviewer → apply runs unattended.** |
+| `APP_NAME` | `github-actions-terraform` | Entra app display name |
+| `SUBSCRIPTION_ID` / `TENANT_ID` | current `az` account | |
+| `LOCATION` | `australiaeast` | |
+| `ENVIRONMENTS` | `dev test prod` | space-separated |
+| `REVIEWED_ENVS` | `prod` | which envs require an approver |
+| `STATE_RG` / `STATE_CONTAINER` | `tfstate-rg` / `tfstate` | |
+| `STATE_SA` | derived from subscription id | set explicitly to **reuse** an existing account (e.g. `tfstate439921213`) |
+
+### 3. Run
+
+```bash
+az login && gh auth login
+./scripts/bootstrap.sh                  # reads scripts/bootstrap.env
+# or override inline:
+PROD_REVIEWERS=rightaboutnow ./scripts/bootstrap.sh
+```
+
+### 4. After bootstrap
+
+1. Ensure the backend in [versions.tf](versions.tf) points at the state account the script
+   created/reused (`storage_account_name`, `resource_group_name`, `container_name`). The values
+   are also written as the `TFSTATE_*` GitHub variables.
+2. Push the code to `main`.
+3. Run the **Terraform Apply** workflow and pick an environment.
+4. Confirm everything with [VALIDATION.md](VALIDATION.md).
 
 ---
 
-## Step 2: Configure Federated Identity Credentials
+## What it creates, and why
 
-This tells Azure to trust OIDC tokens from your specific GitHub repo:
+| Component | Why it exists |
+|---|---|
+| **Azure AD app + service principal** | The identity the pipeline acts as. No secret — it's assumed via OIDC. |
+| **Federated credentials** | The trust rules. `github-main` (subject `…:ref:refs/heads/main`) for the plan jobs; `github-env-<env>` (`…:environment:<env>`) for apply/destroy, because setting `environment: <env>` on a job changes the OIDC token's subject. |
+| **RBAC** (subscription scope) | `Contributor` (manage resources), `User Access Administrator` (Terraform-managed role assignments), `Storage Blob Data Contributor` (blob **data**-plane access — see below). |
+| **Remote state storage** | An Azure Blob container holding Terraform state, hardened (TLS1.2, no public blob, shared-key disabled → Azure AD auth only). |
+| **GitHub Actions variables** | `AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID` + `TFSTATE_*` — non-secret identifiers the workflows read. |
+| **GitHub Environments** (`dev`/`test`/`prod`) | The approval gate (required reviewer) and the source of the `environment:<env>` OIDC subject. |
 
-```bash
-# Replace with your actual GitHub org/repo
-GITHUB_ORG="rightaboutnow"
-GITHUB_REPO="terraform-learn"
+> Subscription-scoped RBAC is intentional: the `rg-<app>-<env>` resource groups are created **by
+> the pipeline**, so a role scoped to them couldn't exist beforehand. Subscription scope covers
+> current and future environments with nothing to pre-provision.
 
-# For the main branch
-az ad app federated-credential create \
-  --id $APP_ID \
-  --parameters '{
-    "name": "github-main",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':ref:refs/heads/main",
-    "audiences": ["api://AzureADTokenExchange"]
-  }'
+### Why `Storage Blob Data Contributor` + `storage_use_azuread`
 
-# One credential per environment. The apply/destroy jobs set
-# `environment: <env>`, which changes the OIDC subject to
-# repo:<org>/<repo>:environment:<env> — so each env needs its own credential.
-for ENV in dev test prod; do
-  az ad app federated-credential create --id $APP_ID --parameters "{
-    \"name\": \"github-env-$ENV\",
-    \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:$GITHUB_ORG/$GITHUB_REPO:environment:$ENV\",
-    \"audiences\": [\"api://AzureADTokenExchange\"]
-  }"
-done
-```
-
-> **Quoting note:** build the `subject` so `$GITHUB_ORG/$GITHUB_REPO` actually expands —
-> if the full `repo:.../.../environment:<env>` doesn't appear in the created credential,
-> the subject got mangled. Verify with:
-> `az ad app federated-credential list --id $APP_ID --query "[].{name:name, subject:subject}" -o table`
+Storage accounts set `shared_access_key_enabled = false`. After creating one, the azurerm
+provider polls the blob **data plane** and by default authenticates with the account key — now
+forbidden, giving `403 Key based authentication is not permitted`. So the provider sets
+`storage_use_azuread = true` (use Azure AD for data-plane ops), and the SP needs a blob **data**
+role. Management-plane `Contributor` does **not** grant blob data access — hence the separate
+`Storage Blob Data Contributor`.
 
 ---
 
-## Step 3: Assign Azure RBAC Roles
+## Remote state: the partial backend
 
-```bash
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-# Contributor on the subscription (or scope to a resource group for least privilege)
-az role assignment create \
-  --assignee $SP_OBJECT_ID \
-  --role "Contributor" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID"
-
-# If Terraform manages role assignments, also add:
-az role assignment create \
-  --assignee $SP_OBJECT_ID \
-  --role "User Access Administrator" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID"
-
-# Data-plane blob access for the storage accounts Terraform CREATES.
-# These set shared_access_key_enabled = false, so the provider must reach the
-# blob data plane via Azure AD (provider sets storage_use_azuread = true). Without
-# this role the post-create data-plane poll fails with:
-#   403 "Key based authentication is not permitted on this storage account."
-# Contributor (above) is management-plane only and does NOT grant blob data access.
-az role assignment create \
-  --assignee $SP_OBJECT_ID \
-  --role "Storage Blob Data Contributor" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID"
-```
-
-> Scope shown at the subscription so it covers every `rg-<app>-<env>` Terraform creates. For
-> tighter least-privilege you can instead assign it per resource group once the RGs exist.
-
----
-
-## Step 4: Bootstrap Remote State Storage (Blob)
-
-Terraform needs a place to store its state file. We create an Azure Storage Account + Blob container **once**, manually, using the az CLI. The pipeline then uses this for remote state. Auth to the blob uses OIDC (Azure AD), so **no storage access keys are stored anywhere**.
-
-```bash
-# Use globally-unique names. Storage account names: 3-24 chars, lowercase letters + numbers only.
-STATE_RG="tfstate-rg"
-STATE_SA="tfstate$RANDOM$RANDOM"   # must be globally unique
-STATE_CONTAINER="tfstate"
-LOCATION="australiaeast"
-
-# 1. Resource group to hold the state storage
-az group create --name $STATE_RG --location $LOCATION
-
-# 2. Storage account (TLS 1.2, no public blob access, key access disabled → forces Azure AD auth)
-az storage account create \
-  --name $STATE_SA \
-  --resource-group $STATE_RG \
-  --location $LOCATION \
-  --sku Standard_LRS \
-  --kind StorageV2 \
-  --min-tls-version TLS1_2 \
-  --allow-blob-public-access false \
-  --allow-shared-key-access false
-
-# 3. Blob container for the state file
-az storage container create \
-  --name $STATE_CONTAINER \
-  --account-name $STATE_SA \
-  --auth-mode login
-
-echo "Storage account name: $STATE_SA"   # put this into versions.tf backend block
-```
-
-Because we disabled shared key access, the service principal needs a data-plane role to read/write the state blob:
-
-```bash
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-az role assignment create \
-  --assignee $SP_OBJECT_ID \
-  --role "Storage Blob Data Contributor" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$STATE_RG/providers/Microsoft.Storage/storageAccounts/$STATE_SA"
-```
-
-Then put the storage account name into the backend block in `versions.tf`. Note the
-**partial backend** — `key` is omitted so each environment gets its own state file; the
-pipeline supplies it at init time:
+The `backend "azurerm"` block in [versions.tf](versions.tf) omits `key` on purpose — a
+**partial backend**. Each environment gets its own state blob (`<app>-<env>.tfstate`), supplied
+at init:
 
 ```hcl
 backend "azurerm" {
   resource_group_name  = "tfstate-rg"
-  storage_account_name = "tfstate439921213"   # <-- the $STATE_SA value from above
+  storage_account_name = "tfstate439921213"   # from bootstrap (STATE_SA)
   container_name       = "tfstate"
-  # key intentionally omitted (partial backend) — set per environment at init:
-  #   terraform init -backend-config="key=learnapp-dev.tfstate"
   use_oidc             = true
-  use_azuread_auth     = true                # use Azure AD (not access keys) for the blob
-}
-```
-
----
-
-## Step 5: Add GitHub Repository Variables
-
-In your GitHub repo → **Settings → Secrets and Variables → Actions → Variables** (not secrets — these aren't sensitive):
-
-| Name | Value |
-|------|-------|
-| `AZURE_CLIENT_ID` | `65045553-6389-4fbb-8c99-4402e1dc11d3` (github-actions-terraform app) |
-| `AZURE_TENANT_ID` | `6f58b108-5b0f-4872-a348-4882ef8ba516` (Default Directory tenant) |
-| `AZURE_SUBSCRIPTION_ID` | `ca91a545-28b9-4e3c-af0b-5acfc817a6ad` (terraform-test subscription) |
-
-> All three IDs are filled in for **terraform-test** (`ca91a545…`) in your Default Directory tenant. Just copy them into GitHub → Settings → Secrets and Variables → Actions → Variables.
-
----
-
-## Step 6: Terraform Project Files
-
-The Terraform configuration lives in the repo root, plus per-environment tfvars:
-
-- `versions.tf` — Terraform/provider versions and the **partial** remote state backend
-- `main.tf` — resources + naming/tags locals
-- `variables.tf` — input variables (naming, governance, storage, networking)
-- `outputs.tf` — outputs
-- `environments/{dev,test,prod}.tfvars` — per-environment values (committed; no secrets)
-
-The backend in `versions.tf` is a **partial backend** — `key` is omitted so each environment
-gets its own state file (`learnapp-<env>.tfstate`), supplied at init time:
-
-```hcl
-# versions.tf
-terraform {
-  required_version = ">= 1.15.0"
-
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 4.76"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "3.9.0"
-    }
-  }
-
-  backend "azurerm" {
-    resource_group_name  = "tfstate-rg"
-    storage_account_name = "tfstate439921213" # from Step 4
-    container_name       = "tfstate"
-    use_oidc             = true
-    use_azuread_auth     = true
-    # key supplied at init: terraform init -backend-config="key=learnapp-<env>.tfstate"
-  }
+  use_azuread_auth     = true                  # Azure AD (not access keys) for the blob
+  # key supplied per env: terraform init -backend-config="key=learnapp-dev.tfstate"
 }
 
 provider "azurerm" {
   features {}
-  use_oidc = true
+  use_oidc            = true
+  storage_use_azuread = true
 }
 ```
 
 ---
 
-## Step 7: GitHub Actions Workflow (pick env → plan → apply)
+## The deploy workflows (pick env → plan → apply)
 
-The pipeline lives in [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) — that
-file is the single source of truth; this section summarizes it. It's **`workflow_dispatch`
-only** and **asks which environment** (`dev`/`test`/`prod`) to target. Two jobs:
+The pipeline is [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) —
+`workflow_dispatch` only, and it **asks which environment** (`dev`/`test`/`prod`). Two jobs:
 
-1. **Plan** — checkout → Azure OIDC login → `terraform init -backend-config="key=learnapp-<env>.tfstate"`,
-   `fmt -check`, `validate`, then `terraform plan -var-file=environments/<env>.tfvars -out=tfplan`,
-   and uploads the plan artifact. No `environment:` on this job, so it auths with `github-main`.
-2. **Apply** — `needs: plan`, targets the **`<env>`** GitHub Environment, re-inits with the same
-   `-backend-config`, downloads the plan artifact, and runs `terraform apply tfplan`.
+1. **Plan** — Azure OIDC login → `terraform init -backend-config="key=<app>-<env>.tfstate"`,
+   `fmt -check`, `validate`, then `plan -var-file=environments/<env>.tfvars -out=tfplan`, and
+   uploads the plan. No `environment:` here, so it auths with `github-main`.
+2. **Apply** — `needs: plan`, sets `environment: <env>` (pauses for the required reviewer if the
+   environment has one, and switches the OIDC subject to `…:environment:<env>`), re-inits with
+   the same key, downloads the plan artifact, and runs `terraform apply tfplan`.
 
-> **Per-environment approval gate:** the apply job sets `environment: <env>`. If that GitHub
-> Environment has a required reviewer (recommended at least for `prod`), the run **pauses** at
-> apply for an **Approve / Reject** click. Setting `environment: <env>` also changes the OIDC
-> subject to `repo:<org>/<repo>:environment:<env>`, matched by the `github-env-<env>` credential
-> from Step 2. Create the `dev`/`test`/`prod` environments (and reviewers) per
-> [README.md](README.md#create-the-github-environments).
-
-> **Why apply re-runs `terraform init`:** it runs on a fresh runner, so the `.terraform`
-> provider cache and backend config don't carry over from the plan job. Re-init uses the same
-> `-backend-config` key, and the `tfplan` artifact is passed plan → apply so apply executes
-> exactly the plan you reviewed.
-
-The companion workflows follow the same env-choice pattern:
-[terraform-destroy.yml](.github/workflows/terraform-destroy.yml) (pick env + type `destroy`) and
+Companion workflows follow the same env-choice pattern:
+[terraform-destroy.yml](.github/workflows/terraform-destroy.yml) (pick env + type `destroy`,
+reviewable plan-destroy → approve) and
 [unlock-state.yml](.github/workflows/unlock-state.yml) (pick env to break that state's lock).
 
 ---
 
-## How the Token Flow Works
+## How the token flow works
 
 ```
-1. GitHub Actions runner starts
-2. Runner requests OIDC JWT from GitHub's token endpoint
-   └─ JWT contains: repo, branch, workflow, etc.
-3. azure/login action sends JWT to Azure AD
-4. Azure AD validates JWT against your federated credential rules
-   └─ Checks issuer = token.actions.githubusercontent.com
-   └─ Checks subject = repo:org/repo:ref:refs/heads/main
-5. Azure AD returns a short-lived access token (1 hour)
-6. Terraform uses ARM_USE_OIDC=true to fetch tokens the same way
+1. Runner requests an OIDC JWT from GitHub (claims: repo, ref/environment, …)
+2. azure/login sends the JWT to Azure AD
+3. Azure AD checks it against the federated credential rules:
+     issuer  = token.actions.githubusercontent.com
+     subject = repo:<org>/<repo>:ref:refs/heads/main   (or :environment:<env>)
+4. Azure AD returns a short-lived (~1h) access token
+5. Terraform fetches its own token the same way via ARM_USE_OIDC=true
 ```
 
 ---
 
-## Key Security Properties
+## Security properties
 
-- **No secrets stored** — client ID, tenant ID, and subscription ID are non-sensitive identifiers
-- **Short-lived tokens** — 1-hour access tokens, auto-refreshed
-- **Scoped trust** — federated credential is locked to your specific repo + branch
-- **Auditable** — all access logged in Azure AD sign-in logs under the service principal
+- **No secrets stored** — client/tenant/subscription IDs are non-sensitive identifiers.
+- **Short-lived tokens** — ~1-hour access tokens, auto-refreshed.
+- **Scoped trust** — each federated credential is locked to a specific repo + ref/environment.
+- **No storage keys** — shared-key access disabled; all blob access is Azure AD.
+- **Auditable** — every access is logged in Azure AD sign-in logs under the service principal.
 
-The `subject` claim in the federated credential is what scopes the trust. This project uses `ref:refs/heads/main` (the plan jobs) and `environment:<env>` for `dev`/`test`/`prod` (the apply/destroy jobs); other forms like `pull_request` are available if you add those triggers.
+## Notes
+
+- **Required reviewers** on environment protection rules need a **public** repo or **GitHub
+  Pro/Team/Enterprise** on a private repo. Without it the environment exists but apply won't pause.
+- Re-running the bootstrap is safe — existing resources are reported as skipped, and an existing
+  environment's protection isn't clobbered.
+- Federated credentials cap at ~20 per app; many repos sharing one app would eventually need a
+  split. Not a concern for one or two.

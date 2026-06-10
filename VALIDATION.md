@@ -1,9 +1,13 @@
 # Setup Validation Guide
 
 Commands to validate that the Terraform + GitHub Actions + Azure OIDC setup is wired
-correctly. Run from the repo root. Substitute your own IDs where noted; the values below
-are the ones for this project (subscription **terraform-test**, repo
+correctly — e.g. after running [scripts/bootstrap.sh](scripts/bootstrap.sh) (see
+[SETUP.md](SETUP.md)). Run from the repo root. Substitute your own IDs where noted;
+the values below are the ones for this project (subscription **terraform-test**, repo
 **rightaboutnow/terraform-learn**).
+
+Run the sections in order. **Section 1** needs no Azure auth; **2–6** need `az login`;
+**7** needs `gh` (or a PAT).
 
 Reference IDs used throughout:
 
@@ -22,7 +26,15 @@ GITHUB_REPO="rightaboutnow/terraform-learn"
 
 ## 1. Local Terraform Validation
 
-No Azure auth needed — `-backend=false` skips the remote state backend.
+No Azure auth needed — `-backend=false` skips the remote state backend. Quick one-liner:
+
+```bash
+terraform fmt -check -recursive && \
+  terraform init -backend=false -input=false >/dev/null && \
+  terraform validate && rm -rf .terraform
+```
+
+Or step by step:
 
 ```bash
 # Tooling versions
@@ -190,31 +202,19 @@ curl -s -H "Authorization: Bearer $GH_TOKEN" \
   https://api.github.com/repos/$GITHUB_REPO/actions/variables
 ```
 
-**Expected:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` set to the IDs
-in the reference block above (Settings → Secrets and variables → Actions → Variables).
+**Expected:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` (and
+`TFSTATE_RESOURCE_GROUP` / `TFSTATE_STORAGE_ACCOUNT` / `TFSTATE_CONTAINER`) set to the values in
+the reference block above (Settings → Secrets and variables → Actions → Variables).
 
----
+### GitHub Environments
 
-## Validation Results (2026-06-08)
+```bash
+# Each environment exists, and prod has a required reviewer
+for env in dev test prod; do
+  gh api "repos/$GITHUB_REPO/environments/$env" \
+    --jq "{name, reviewers: ([.protection_rules[]? | select(.type==\"required_reviewers\")] | length)}"
+done
+```
 
-| Area | Check | Status |
-|------|-------|--------|
-| Local | `terraform fmt -check` | ✅ clean |
-| Local | `terraform validate` | ✅ valid |
-| Local | provider version locked | ✅ azurerm 4.76.0 |
-| Azure | subscription / tenant | ✅ terraform-test, tenant matches |
-| Azure | app registration | ✅ github-actions-terraform |
-| Azure | service principal | ✅ exists |
-| Azure | federated credential `github-main` | ✅ matches dispatch on main (plan job) |
-| Azure | federated credentials `github-env-dev/test/prod` | ✅ match apply/destroy per environment |
-| Azure | RBAC Contributor (subscription) | ✅ |
-| Azure | RBAC User Access Administrator (subscription) | ✅ |
-| Azure | RBAC Storage Blob Data Contributor (subscription — for created storage accounts) | ✅ |
-| Azure | storage account hardening | ✅ TLS1.2, public off, shared-key off |
-| Azure | state container (Azure AD auth) | ✅ reachable |
-| GitHub | SSH access | ✅ as rightaboutnow |
-| GitHub | repo `rightaboutnow/terraform-learn` | ✅ exists |
-| GitHub | code pushed to repo | ⚠️ empty — nothing pushed yet |
-| GitHub | local dir is a git repo | ❌ not initialized |
-| GitHub | Actions variables | ⏳ not verified (needs gh CLI / PAT) |
-</content>
+**Expected:** all three environments exist; `prod` reports `reviewers: 1` (or more). An
+environment with `reviewers: 0` does **not** pause apply — it runs unattended.

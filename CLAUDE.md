@@ -22,7 +22,8 @@ Azure AD. The repo is `rightaboutnow/terraform-learn` (subscription `terraform-t
 | `.github/workflows/terraform-apply.yml` | Manual deploy: pick env → plan → approve → apply |
 | `.github/workflows/terraform-destroy.yml` | Manual teardown: pick env → plan-destroy → approve → destroy |
 | `.github/workflows/unlock-state.yml` | Manual: break a stale state-lock lease for one env |
-| `SETUP.md` | One-time Azure/GitHub provisioning runbook |
+| `scripts/bootstrap.sh` + `scripts/bootstrap.env` | Idempotent one-time provisioning of all prerequisites; config in the `.env` |
+| `SETUP.md` | Run the bootstrap + architecture reference (what the setup is and why) |
 | `VALIDATION.md` | Copy-paste commands to validate the live setup (+ the real IDs) |
 | `README.md` | Human-facing overview |
 
@@ -102,8 +103,9 @@ Don't run `terraform apply` locally against the real backend unless explicitly a
 - **Workflow edits only take effect once on the repo's default branch** — `gh workflow run` and the
   Actions UI read the workflow from the branch, not your local files.
 - **State isolation is sacred.** Never point two environments (or a clone for another
-  subscription) at the same state `key`. Cloning for a new subscription also needs new state
-  storage, RBAC, federated credentials, and Actions variables (see `SETUP.md`).
+  subscription) at the same state `key`. Cloning to a new repo/subscription is automated by
+  `scripts/bootstrap.sh` (new app/SP, federated creds, RBAC, state storage, Actions variables,
+  environments) — see `SETUP.md`.
 - The **state storage account** (`tfstate439921213` / RG `tfstate-rg`) is bootstrapped **outside**
   Terraform. `terraform destroy` never touches it.
 - **`403 Key based authentication is not permitted`** on storage apply = the account has
@@ -121,4 +123,3 @@ Don't run `terraform apply` locally against the real backend unless explicitly a
   real runs.
 - Don't weaken the security posture: no secrets, keep `shared_access_key_enabled = false`, keep
   public blob access off, keep OIDC.
-</content>
