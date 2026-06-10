@@ -115,13 +115,14 @@ az role assignment list --assignee "$SP_OBJECT_ID" --include-inherited -o table
   creates (they disable shared-key auth, and the provider uses `storage_use_azuread = true`).
   Without it, apply fails with `403 Key based authentication is not permitted`.
 
-There is also an older `Storage Blob Data Contributor` scoped to just the **state** storage
-account (a child scope — won't show in the subscription list above). It's now redundant with the
-subscription-scoped grant but harmless:
+All three are at subscription scope, so they inherit down to every resource group the pipeline
+creates (`rg-<app>-<env>`) and to the state storage account — no per-account assignment needed.
+Confirm the state account is covered via inheritance:
 
 ```bash
 SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$STATE_RG/providers/Microsoft.Storage/storageAccounts/$STATE_SA"
 az role assignment list --assignee "$SP_OBJECT_ID" --scope "$SCOPE" --include-inherited -o table
+# Expect: Contributor, User Access Administrator, Storage Blob Data Contributor (all inherited)
 ```
 
 > Note: `--all` together with `--assignee` errors on az 2.75 (`group or scope are not
