@@ -8,7 +8,7 @@ the architecture and the non-obvious rules that aren't visible from any single f
 A learning project for managing **Azure** infrastructure with **Terraform**, deployed via
 **GitHub Actions** using **OIDC** (workload identity federation) — no client secrets or storage
 keys are stored anywhere. Terraform state lives in an Azure Blob container, authenticated with
-Azure AD. The repo is `rightaboutnow/terraform-learn` (subscription `terraform-test`).
+Azure AD. The repo is `<org>/<repo>` (subscription `<subscription-name>`).
 
 ## Repository map
 
@@ -66,7 +66,7 @@ terraform init -backend=false
 terraform validate
 
 # Full local init against the real backend (needs `az login`); pick the env's state key
-terraform init -backend-config="key=learnapp-dev.tfstate"
+terraform init -backend-config="key=<app>-dev.tfstate"
 terraform plan -var-file="environments/dev.tfvars"
 
 # Validate the live Azure/GitHub setup
@@ -93,7 +93,7 @@ Don't run `terraform apply` locally against the real backend unless explicitly a
 
 - **Run stuck on "Acquiring state lock"** = a stale blob lease from a cancelled run. Fix with the
   **Unlock Terraform State** workflow (or `az storage blob lease break` on
-  `learnapp-<env>.tfstate`). Never auto-break leases inside the deploy pipeline — it would smash a
+  `<app>-<env>.tfstate`). Never auto-break leases inside the deploy pipeline — it would smash a
   legitimately running apply's lock. `plan`/`apply` already pass `-lock-timeout=120s` to fail fast.
 - **GitHub Environment protection rules** (required reviewers) need a **public repo** or **GitHub
   Pro/Team/Enterprise**. Without the rule, `environment:` does not pause — apply runs unattended.
@@ -106,7 +106,7 @@ Don't run `terraform apply` locally against the real backend unless explicitly a
   subscription) at the same state `key`. Cloning to a new repo/subscription is automated by
   `scripts/bootstrap.sh` (new app/SP, federated creds, RBAC, state storage, Actions variables,
   environments) — see `SETUP.md`.
-- The **state storage account** (`tfstate439921213` / RG `tfstate-rg`) is bootstrapped **outside**
+- The **state storage account** (`<state-storage-account>` / RG `tfstate-rg`) is bootstrapped **outside**
   Terraform. `terraform destroy` never touches it.
 - **`403 Key based authentication is not permitted`** on storage apply = the account has
   `shared_access_key_enabled = false`, so the provider must use Azure AD for the data plane. Two

@@ -3,8 +3,8 @@
 Commands to validate that the Terraform + GitHub Actions + Azure OIDC setup is wired
 correctly — e.g. after running [scripts/bootstrap.sh](scripts/bootstrap.sh) (see
 [SETUP.md](SETUP.md)). Run from the repo root. Substitute your own IDs where noted;
-the values below are the ones for this project (subscription **terraform-test**, repo
-**rightaboutnow/terraform-learn**).
+the values below are the ones for this project (subscription **<subscription-name>**, repo
+**<org>/<repo>**).
 
 Run the sections in order. **Section 1** needs no Azure auth; **2–6** need `az login`;
 **7** needs `gh` (or a PAT).
@@ -12,14 +12,14 @@ Run the sections in order. **Section 1** needs no Azure auth; **2–6** need `az
 Reference IDs used throughout:
 
 ```bash
-APP_ID="65045553-6389-4fbb-8c99-4402e1dc11d3"          # AZURE_CLIENT_ID (github-actions-terraform)
-SP_OBJECT_ID="7226a2f3-848b-4d90-8e44-e1094e995356"    # service principal object id
-SUBSCRIPTION_ID="ca91a545-28b9-4e3c-af0b-5acfc817a6ad" # terraform-test
-TENANT_ID="6f58b108-5b0f-4872-a348-4882ef8ba516"
+APP_ID="<client-id>"          # AZURE_CLIENT_ID (github-actions-terraform)
+SP_OBJECT_ID="<sp-object-id>"    # service principal object id
+SUBSCRIPTION_ID="<subscription-id>" # <subscription-name>
+TENANT_ID="<tenant-id>"
 STATE_RG="tfstate-rg"
-STATE_SA="tfstate439921213"
+STATE_SA="<state-storage-account>"
 STATE_CONTAINER="tfstate"
-GITHUB_REPO="rightaboutnow/terraform-learn"
+GITHUB_REPO="<org>/<repo>"
 ```
 
 ---
@@ -67,7 +67,7 @@ and the lock file pins `azurerm` `4.76.0` (constraint `~> 4.76`).
 az account show -o json
 ```
 
-**Expected:** `id` = `ca91a545-…`, `tenantId` = `6f58b108-…`, name `terraform-test`.
+**Expected:** `id` = `<subscription-id>`, `tenantId` = `<tenant-id>`, name `<subscription-name>`.
 
 ---
 
@@ -100,10 +100,10 @@ audience `api://AzureADTokenExchange`:
 
 | name              | subject                                                        |
 |-------------------|----------------------------------------------------------------|
-| `github-main`     | `repo:rightaboutnow/terraform-learn:ref:refs/heads/main`       |
-| `github-env-dev`  | `repo:rightaboutnow/terraform-learn:environment:dev`           |
-| `github-env-test` | `repo:rightaboutnow/terraform-learn:environment:test`          |
-| `github-env-prod` | `repo:rightaboutnow/terraform-learn:environment:prod`          |
+| `github-main`     | `repo:<org>/<repo>:ref:refs/heads/main`       |
+| `github-env-dev`  | `repo:<org>/<repo>:environment:dev`           |
+| `github-env-test` | `repo:<org>/<repo>:environment:test`          |
+| `github-env-prod` | `repo:<org>/<repo>:environment:prod`          |
 
 > `github-main` covers the **plan** job (`workflow_dispatch` on main → subject is the main ref).
 > The **apply/destroy** jobs set `environment: <env>`, which changes the subject to
@@ -160,13 +160,13 @@ Succeeded`; container `tfstate` returns its name (proves Azure AD data-plane acc
 
 The storage account + container must match the `backend "azurerm"` block in
 [versions.tf](versions.tf). The backend is **partial** — `key` is set per environment at init
-(`learnapp-<env>.tfstate`), so each env has its own blob:
+(`<app>-<env>.tfstate`), so each env has its own blob:
 
 ```bash
 # List per-environment state blobs (created on first apply of each env)
 az storage blob list --container-name "$STATE_CONTAINER" --account-name "$STATE_SA" \
   --auth-mode login --query "[].name" -o tsv
-# Expect: learnapp-dev.tfstate, learnapp-test.tfstate, learnapp-prod.tfstate (as you deploy each)
+# Expect: <app>-dev.tfstate, <app>-test.tfstate, <app>-prod.tfstate (as you deploy each)
 ```
 
 ---
@@ -183,7 +183,7 @@ ssh -T git@github.com
 git ls-remote git@github.com:$GITHUB_REPO.git
 ```
 
-**Expected:** SSH greets you as `rightaboutnow`. `git ls-remote` exits 0; a non-empty
+**Expected:** SSH greets you as `<org>`. `git ls-remote` exits 0; a non-empty
 output lists branches. **Empty output = repo exists but nothing has been pushed yet** —
 the pipeline can't run until the code is on `main`.
 

@@ -81,7 +81,12 @@ jobs:
           terraform_version: "~1.15"
 
       - name: Terraform Init
-        run: terraform init -backend-config="key=${{ steps.ctx.outputs.state_key }}"
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ steps.ctx.outputs.state_key }}"
 
       - name: Terraform Plan (destroy)
         # Review THIS step's output before approving — it lists every resource
@@ -120,7 +125,12 @@ jobs:
 
       - name: Terraform Init
         # Reuse the exact state key resolved by the plan-destroy job.
-        run: terraform init -backend-config="key=${{ needs.plan-destroy.outputs.state_key }}"
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ needs.plan-destroy.outputs.state_key }}"
 
       - name: Download Destroy Plan Artifact
         uses: actions/download-artifact@v8

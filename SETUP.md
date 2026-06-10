@@ -39,8 +39,8 @@ roles — unavoidable):
 Put the two required values in [scripts/bootstrap.env](scripts/bootstrap.env) (auto-sourced):
 
 ```bash
-export GITHUB_OWNER="rightaboutnow"     # org/user that owns the repo
-export GITHUB_REPO="terraform-learn"    # repo name (must already exist)
+export GITHUB_OWNER="<org>"     # org/user that owns the repo
+export GITHUB_REPO="<repo>"    # repo name (must already exist)
 ```
 
 Everything else has a default — override any of these inline or in `bootstrap.env`:
@@ -55,7 +55,7 @@ Everything else has a default — override any of these inline or in `bootstrap.
 | `ENVIRONMENTS` | `dev test prod` | space-separated |
 | `REVIEWED_ENVS` | `prod` | which envs require an approver |
 | `STATE_RG` / `STATE_CONTAINER` | `tfstate-rg` / `tfstate` | |
-| `STATE_SA` | derived from subscription id | set explicitly to **reuse** an existing account (e.g. `tfstate439921213`) |
+| `STATE_SA` | derived from subscription id | set explicitly to **reuse** an existing account (e.g. `<state-storage-account>`) |
 
 ### 3. Run
 
@@ -63,7 +63,7 @@ Everything else has a default — override any of these inline or in `bootstrap.
 az login && gh auth login
 ./scripts/bootstrap.sh                  # reads scripts/bootstrap.env
 # or override inline:
-PROD_REVIEWERS=rightaboutnow ./scripts/bootstrap.sh
+PROD_REVIEWERS=<org> ./scripts/bootstrap.sh
 ```
 
 ### 4. After bootstrap
@@ -105,20 +105,33 @@ role. Management-plane `Contributor` does **not** grant blob data access — hen
 
 ## Remote state: the partial backend
 
-The `backend "azurerm"` block in [versions.tf](versions.tf) omits `key` on purpose — a
-**partial backend**. Each environment gets its own state blob (`<app>-<env>.tfstate`), supplied
-at init:
+The `backend "azurerm"` block in [versions.tf](versions.tf) is **fully partial** — the account,
+RG, container, and the per-environment `key` are all supplied at init via `-backend-config`, so
+the file is repo/subscription-agnostic. In CI these come from the repo's **GitHub Actions
+variables** (`TFSTATE_RESOURCE_GROUP` / `TFSTATE_STORAGE_ACCOUNT` / `TFSTATE_CONTAINER`, set by
+the bootstrap); the key is `<app>-<env>.tfstate`:
 
 ```hcl
 backend "azurerm" {
-  resource_group_name  = "tfstate-rg"
-  storage_account_name = "tfstate439921213"   # from bootstrap (STATE_SA)
-  container_name       = "tfstate"
-  use_oidc             = true
-  use_azuread_auth     = true                  # Azure AD (not access keys) for the blob
-  # key supplied per env: terraform init -backend-config="key=learnapp-dev.tfstate"
+  use_oidc         = true
+  use_azuread_auth = true   # Azure AD (not access keys) for the blob
+  # account / resource_group / container / key all via -backend-config at init
 }
+```
 
+The pipeline's init step therefore looks like:
+
+```bash
+terraform init \
+  -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+  -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+  -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+  -backend-config="key=<app>-<env>.tfstate"
+```
+
+The provider config:
+
+```hcl
 provider "azurerm" {
   features {}
   use_oidc            = true

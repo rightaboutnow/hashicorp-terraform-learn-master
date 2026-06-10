@@ -27,6 +27,7 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 | [SETUP.md](SETUP.md) | Run the bootstrap + how the setup works (architecture) |
 | [VALIDATION.md](VALIDATION.md) | Commands to validate the whole setup |
 | [CLAUDE.md](CLAUDE.md) | Architecture & conventions guide for AI agents |
+| [CREDITS.md](CREDITS.md) | Author and acknowledgments |
 
 ---
 
@@ -34,14 +35,14 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 
 | Concern | How it's separated per environment |
 |---------|-------------------------------------|
-| **State file** | Partial backend; `key` set at init: `learnapp-<env>.tfstate` (one blob per env in the `tfstate` container) |
+| **State file** | Partial backend; `key` set at init: `<app>-<env>.tfstate` (one blob per env in the `tfstate` container) |
 | **Variables** | `environments/<env>.tfvars` passed via `-var-file` |
 | **Approval gate** | A GitHub **Environment** per env (`dev`, `test`, `prod`) with its own reviewer rules |
 | **OIDC trust** | A federated credential per env: `repo:<org>/<repo>:environment:<env>` |
 | **Concurrency** | Lock group `terraform-<env>` — a dev run never blocks a prod run |
 
 The same `main.tf` deploys all three; only the tfvars and state key change. So
-`rg-learnapp-dev`, `rg-learnapp-test`, `rg-learnapp-prod` are fully independent, each with
+`rg-<app>-dev`, `rg-<app>-test`, `rg-<app>-prod` are fully independent, each with
 its own tags, networking, and storage settings from `environments/<env>.tfvars`.
 
 ---
@@ -66,7 +67,7 @@ its own tags, networking, and storage settings from `environments/<env>.tfvars`.
 [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) is
 **`workflow_dispatch` only** — it asks which environment to target, then runs two jobs:
 
-1. **Plan** — `terraform init -backend-config="key=learnapp-<env>.tfstate"`, `fmt -check`,
+1. **Plan** — `terraform init -backend-config="key=<app>-<env>.tfstate"`, `fmt -check`,
    `validate`, then `terraform plan -var-file=environments/<env>.tfvars`; uploads the plan as
    an artifact. (No environment on this job, so it authenticates with the `github-main`
    credential.)
@@ -84,7 +85,7 @@ its own tags, networking, and storage settings from `environments/<env>.tfvars`.
 
 ```bash
 # Or via the GitHub CLI
-gh workflow run terraform-apply.yml -R rightaboutnow/terraform-learn --ref main -f environment=dev
+gh workflow run terraform-apply.yml -R <org>/<repo> --ref main -f environment=dev
 ```
 
 ---
@@ -106,7 +107,7 @@ the setup consists of:
   Terraform-managed role assignments), and `Storage Blob Data Contributor` — the last is
   needed because resources set `shared_access_key_enabled = false` and the provider uses
   `storage_use_azuread = true`, so it reaches the blob data plane via Azure AD
-- A **state storage account** (`tfstate439921213`) + `tfstate` container (shared-key access
+- A **state storage account** (`<state-storage-account>`) + `tfstate` container (shared-key access
   disabled → Azure AD only)
 - Three **GitHub Actions variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
   `AZURE_SUBSCRIPTION_ID`
@@ -129,13 +130,19 @@ terraform fmt -recursive
 terraform init -backend=false
 terraform validate
 
-# Full init against the real backend for a specific environment (needs az login / OIDC)
-terraform init -backend-config="key=learnapp-dev.tfstate"
+# Full init against the real backend for a specific environment (needs az login / OIDC).
+# The backend is fully partial, so pass the account/RG/container too (CI reads these
+# from the TFSTATE_* repo variables; locally, supply them yourself):
+terraform init \
+  -backend-config="resource_group_name=tfstate-rg" \
+  -backend-config="storage_account_name=<state-storage-account>" \
+  -backend-config="container_name=tfstate" \
+  -backend-config="key=<app>-dev.tfstate"
 terraform plan -var-file="environments/dev.tfvars"
 ```
 
 > `apply` is intentionally left to the CI pipeline. Run it locally only if you know what you
-> are doing — and always pass the matching `-backend-config` key and `-var-file`.
+> are doing — and always pass the matching `-backend-config` values and `-var-file`.
 
 ---
 
@@ -220,7 +227,7 @@ Run from the repo root. **Pushing does not deploy** — deploys are manual `work
 git init -b main
 git add .                # .gitignore keeps state/plan out; environments/*.tfvars ARE committed
 git commit -m "Terraform + GitHub Actions Azure OIDC multi-env pipeline"
-git remote add origin git@github.com:rightaboutnow/terraform-learn.git
+git remote add origin git@github.com:<org>/<repo>.git
 git push -u origin main
 ```
 
@@ -262,7 +269,7 @@ shape — **plan-destroy → approve → destroy**:
 **confirm** = `destroy` → Run → review the Plan Destroy output → **Approve**.
 
 ```bash
-gh workflow run terraform-destroy.yml -R rightaboutnow/terraform-learn --ref main \
+gh workflow run terraform-destroy.yml -R <org>/<repo> --ref main \
   -f environment=dev -f confirm=destroy
 ```
 
@@ -275,19 +282,19 @@ state storage account (bootstrapped outside Terraform).
 
 ### Run hangs on "Acquiring state lock…"
 
-The `azurerm` backend locks state with a **blob lease** on `learnapp-<env>.tfstate`. A run
+The `azurerm` backend locks state with a **blob lease** on `<app>-<env>.tfstate`. A run
 cancelled mid-`init`/`plan`/`apply` leaves the lease held, blocking the next run for that
 environment.
 
 **Check / break the lease for an environment** (e.g. `dev`):
 
 ```bash
-az storage blob show --container-name tfstate --name learnapp-dev.tfstate \
-  --account-name tfstate439921213 --auth-mode login \
+az storage blob show --container-name tfstate --name <app>-dev.tfstate \
+  --account-name <state-storage-account> --auth-mode login \
   --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state}" -o json
 
-az storage blob lease break --container-name tfstate --blob-name learnapp-dev.tfstate \
-  --account-name tfstate439921213 --auth-mode login
+az storage blob lease break --container-name tfstate --blob-name <app>-dev.tfstate \
+  --account-name <state-storage-account> --auth-mode login
 ```
 
 **Or from GitHub:** run **Unlock Terraform State**
@@ -308,3 +315,11 @@ az storage blob lease break --container-name tfstate --blob-name learnapp-dev.tf
 - **No storage keys** — shared-key access disabled; state blobs use Azure AD auth.
 - **Per-environment isolation** — separate state files, environments, and approval gates.
 - **Auditable** — all access logged in Azure AD sign-in logs under the service principal.
+
+---
+
+## Author & copyright
+
+Authored by **Jenson Thomas**. © 2026 Jenson Thomas. All rights reserved.
+
+See [CREDITS.md](CREDITS.md) for full credits and acknowledgments.
