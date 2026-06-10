@@ -17,6 +17,9 @@ tfplan
 *.tfvars
 *.tfvars.json
 !example.tfvars
+# Per-environment config IS committed (no secrets — just sizing/region/tags)
+!environments/
+!environments/*.tfvars
 
 # CLI configuration files
 .terraformrc

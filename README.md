@@ -1,8 +1,9 @@
 # terrazlearn — Terraform on Azure with GitHub Actions (OIDC)
 
-A learning project for managing Azure infrastructure with Terraform, deployed through
-GitHub Actions using **OpenID Connect (OIDC)** — no client secrets or storage keys stored
-anywhere. State lives in an Azure Blob container authenticated with Azure AD.
+A learning project for managing Azure infrastructure with Terraform across **three
+environments (dev / test / prod)**, deployed through GitHub Actions using **OpenID Connect
+(OIDC)** — no client secrets or storage keys stored anywhere. Each environment has its **own
+state file** in an Azure Blob container authenticated with Azure AD.
 
 ```
 GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) → Azure APIs
@@ -14,15 +15,33 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 
 | File | Purpose |
 |------|---------|
-| [versions.tf](versions.tf) | Terraform & `azurerm` provider versions + the remote state backend |
-| [main.tf](main.tf) | Your Azure resources (skeleton — add as you learn) |
-| [variables.tf](variables.tf) | Input variables (location, resource group name, tags) |
-| [outputs.tf](outputs.tf) | Output values (skeleton) |
-| [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) | CI/CD pipeline: init → plan → apply |
-| [.gitignore](.gitignore) | Excludes `.terraform/`, state, plan, and `*.tfvars` |
-| [.terraform.lock.hcl](.terraform.lock.hcl) | Provider dependency lock (committed) |
-| [github-actions-azure-terraform-oidc.md](github-actions-azure-terraform-oidc.md) | One-time Azure/GitHub setup guide |
+| [versions.tf](versions.tf) | Terraform & `azurerm` versions + the **partial** remote state backend |
+| [main.tf](main.tf) | Azure resources + naming/tags locals |
+| [variables.tf](variables.tf) | Input variables (naming, governance, storage, networking) |
+| [outputs.tf](outputs.tf) | Output values (RG, storage account, tags, environment) |
+| [environments/dev.tfvars](environments/dev.tfvars) · [test.tfvars](environments/test.tfvars) · [prod.tfvars](environments/prod.tfvars) | Per-environment values (committed; no secrets) |
+| [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) | Deploy: pick env → plan → approve → apply |
+| [.github/workflows/terraform-destroy.yml](.github/workflows/terraform-destroy.yml) | Manual teardown of a chosen environment |
+| [.github/workflows/unlock-state.yml](.github/workflows/unlock-state.yml) | Break a stuck state lock for a chosen environment |
+| [SETUP.md](SETUP.md) | One-time Azure/GitHub setup guide |
 | [VALIDATION.md](VALIDATION.md) | Commands to validate the whole setup |
+| [CLAUDE.md](CLAUDE.md) | Architecture & conventions guide for AI agents |
+
+---
+
+## Multi-environment model
+
+| Concern | How it's separated per environment |
+|---------|-------------------------------------|
+| **State file** | Partial backend; `key` set at init: `learnapp-<env>.tfstate` (one blob per env in the `tfstate` container) |
+| **Variables** | `environments/<env>.tfvars` passed via `-var-file` |
+| **Approval gate** | A GitHub **Environment** per env (`dev`, `test`, `prod`) with its own reviewer rules |
+| **OIDC trust** | A federated credential per env: `repo:<org>/<repo>:environment:<env>` |
+| **Concurrency** | Lock group `terraform-<env>` — a dev run never blocks a prod run |
+
+The same `main.tf` deploys all three; only the tfvars and state key change. So
+`rg-learnapp-dev`, `rg-learnapp-test`, `rg-learnapp-prod` are fully independent, each with
+its own tags, networking, and storage settings from `environments/<env>.tfvars`.
 
 ---
 
@@ -32,6 +51,7 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 |-----------|---------|
 | Terraform | `>= 1.15.0` (CI pins `~1.15`) |
 | azurerm provider | `~> 4.76` (locked at 4.76.0) |
+| random provider | `3.9.0` |
 | actions/checkout | v6 |
 | azure/login | v3 |
 | hashicorp/setup-terraform | v4 |
@@ -40,87 +60,74 @@ GitHub Actions → OIDC JWT → Azure AD validates → short-lived token (1h) �
 
 ---
 
-## How the pipeline works
+## How the deploy pipeline works
 
-[.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) runs two jobs on every
-push to `main`:
+[.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) is
+**`workflow_dispatch` only** — it asks which environment to target, then runs two jobs:
 
-1. **Plan** — `terraform init`, `fmt -check`, `validate`, then `terraform plan`; uploads the
-   plan as a CI artifact. (Init, validation, and plan are combined into one job since they're
-   sequential and share state — one runner, one `init`.)
-2. **Apply** — *waits for manual approval.* The job targets the **`production`**
-   environment, which has a required reviewer. The run **pauses after plan** and waits for an
-   **Approve / Reject** click. Approving applies the exact plan from the Plan job; rejecting
-   ends the run without changes — **no re-run needed either way**.
+1. **Plan** — `terraform init -backend-config="key=learnapp-<env>.tfstate"`, `fmt -check`,
+   `validate`, then `terraform plan -var-file=environments/<env>.tfvars`; uploads the plan as
+   an artifact. (No environment on this job, so it authenticates with the `github-main`
+   credential.)
+2. **Apply** — *waits for manual approval.* The job targets the **`<env>`** GitHub Environment.
+   If that environment has a required reviewer, the run **pauses after plan** for an
+   **Approve / Reject** click, then applies the exact plan from the Plan job.
 
-Apply runs on a fresh runner, so it re-runs `terraform init`; the saved plan is passed from
-Plan → Apply as an artifact so apply executes exactly what was reviewed.
+> Apply runs on a fresh runner, so it re-inits with the same `-backend-config`; the saved plan
+> is passed Plan → Apply as an artifact so apply executes exactly what was reviewed.
 
-### Choosing whether to apply (the approval gate)
+### Run a deployment
 
-Every run (push to `main` or manual **Run workflow**) does init → plan, then stops at the
-apply job pending approval:
+**Actions** → **Terraform Apply** → **Run workflow** → choose **environment** (`dev`/`test`/`prod`)
+→ Run. Then review the Plan job and approve the Apply job if the environment gates it.
 
-1. Open the run under the **Actions** tab. After Plan finishes you'll see **Review
-   deployments** / a yellow "Waiting" badge on the Apply job.
-2. Review the plan output in the Plan job's logs.
-3. Click **Review deployments** → tick **production** → **Approve and deploy** to apply, or
-   **Reject** to stop. Reviewers are also emailed/notified when a run is waiting.
-
-Approvals time out after a configurable window (default 30 days). Approving/rejecting acts on
-the *same* run — the plan is never recomputed, so apply uses exactly what you reviewed.
-
-> **One-time setup** of the `production` environment (required reviewer) is described under
-> [Prerequisites](#prerequisites). Without it the apply job would run unattended.
+```bash
+# Or via the GitHub CLI
+gh workflow run terraform-apply.yml -R rightaboutnow/terraform-learn --ref main -f environment=dev
+```
 
 ---
 
 ## Prerequisites
 
-The Azure/GitHub trust must be provisioned once before the pipeline can run — full steps in
-[github-actions-azure-terraform-oidc.md](github-actions-azure-terraform-oidc.md). In short:
+The Azure/GitHub trust is provisioned once — full steps in
+[SETUP.md](SETUP.md). In short:
 
 - An Azure AD **app registration** + **service principal** (`github-actions-terraform`)
-- **Federated credentials** trusting these OIDC subjects:
-  - `repo:<org>/<repo>:ref:refs/heads/main` — used by the plan job (and push)
-  - `repo:<org>/<repo>:environment:production` — used by the **apply** job (the environment
-    changes the token subject; without this credential apply's Azure login fails)
-  - `repo:<org>/<repo>:pull_request` — optional, for plan-only PR runs
+- **Federated credentials** trusting these OIDC subjects (all created for this project):
+  - `repo:<org>/<repo>:ref:refs/heads/main` — plan jobs / dispatch on main (`github-main`)
+  - `repo:<org>/<repo>:environment:dev` — apply/destroy to dev (`github-env-dev`)
+  - `repo:<org>/<repo>:environment:test` — apply/destroy to test (`github-env-test`)
+  - `repo:<org>/<repo>:environment:prod` — apply/destroy to prod (`github-env-prod`)
 - **RBAC**: `Contributor` (+ `User Access Administrator` if Terraform manages role
   assignments) on the subscription, and `Storage Blob Data Contributor` on the state storage
   account
-- A **state storage account** + blob container (shared-key access disabled → Azure AD only)
+- A **state storage account** (`tfstate439921213`) + `tfstate` container (shared-key access
+  disabled → Azure AD only)
 - Three **GitHub Actions variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
   `AZURE_SUBSCRIPTION_ID`
-- A **GitHub Environment named `production`** with a **required reviewer** — this is what
-  makes apply pause for approval.
+- **GitHub Environments** named `dev`, `test`, `prod`. Add a **required reviewer** to the ones
+  you want gated (at minimum `prod`).
 
-### Create the `production` environment + federated credential
+### Create the GitHub Environments
 
-**GitHub Environment (UI):** repo → **Settings** → **Environments** → **New environment** →
-name it `production` → enable **Required reviewers** → add yourself → **Save**.
+**UI:** repo → **Settings** → **Environments** → **New environment** → name it `dev` / `test` /
+`prod` → (for gated envs) enable **Required reviewers** → add yourself → **Save**.
 
-**GitHub Environment (gh CLI):**
+**gh CLI** (required reviewer on prod; repeat per env as desired):
 
 ```bash
-# Required reviewers via the REST API (replace USER_ID with your numeric GitHub user id:
-#   gh api user --jq .id   )
-gh api -X PUT repos/rightaboutnow/terraform-learn/environments/production \
+# numeric user id: gh api user --jq .id
+gh api -X PUT repos/rightaboutnow/terraform-learn/environments/prod \
   -f "reviewers[][type]=User" -F "reviewers[][id]=USER_ID"
+
+# dev/test with no reviewer (auto-apply after plan) — just create them:
+gh api -X PUT repos/rightaboutnow/terraform-learn/environments/dev
+gh api -X PUT repos/rightaboutnow/terraform-learn/environments/test
 ```
 
-**Azure federated credential for the environment** (already created for this project):
-
-```bash
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "github-env-production",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:rightaboutnow/terraform-learn:environment:production",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
-
-To validate all of the above, see [VALIDATION.md](VALIDATION.md).
+The matching Azure federated credentials (`github-env-dev/test/prod`) already exist — verify
+with [VALIDATION.md](VALIDATION.md).
 
 ---
 
@@ -134,52 +141,46 @@ terraform fmt -recursive
 terraform init -backend=false
 terraform validate
 
-# Full init against the real backend (needs az login / OIDC)
-terraform init
-terraform plan
+# Full init against the real backend for a specific environment (needs az login / OIDC)
+terraform init -backend-config="key=learnapp-dev.tfstate"
+terraform plan -var-file="environments/dev.tfvars"
 ```
 
 > `apply` is intentionally left to the CI pipeline. Run it locally only if you know what you
-> are doing.
+> are doing — and always pass the matching `-backend-config` key and `-var-file`.
 
 ---
 
 ## First-time deployment checklist
 
-Do these **in order**. The ordering matters: the approval gate isn't active until the GitHub
-Environment exists, so create it before (or immediately after) the first push — otherwise the
-very first run will **apply unattended**.
+Do these **in order**:
 
-1. **Provision the Azure side** (one-time) — app/SP, federated credentials, RBAC, state
-   storage. See [github-actions-azure-terraform-oidc.md](github-actions-azure-terraform-oidc.md)
-   and confirm with [VALIDATION.md](VALIDATION.md). Make sure the
-   `repo:<org>/<repo>:environment:production` federated credential exists (see
-   [Prerequisites](#prerequisites)).
+1. **Provision the Azure side** (one-time) — app/SP, the four federated credentials, RBAC,
+   state storage. See [SETUP.md](SETUP.md)
+   and confirm with [VALIDATION.md](VALIDATION.md).
 2. **Set the three GitHub Actions variables** — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID` (repo → Settings → Secrets and variables → Actions → Variables).
-3. **Create the `production` Environment with a required reviewer** — repo → Settings →
-   Environments → New environment → `production` → enable **Required reviewers** → add
-   yourself → Save. ⚠️ **Skip this and apply runs with no approval.**
-4. **Push the code to `main`** — see [Git commands](#git-commands) below. This starts the
-   first run.
-5. **Watch the run** — init → plan run automatically; the apply job then **pauses** for
-   approval (see [the approval gate](#choosing-whether-to-apply-the-approval-gate)).
-6. **Review the plan, then Approve or Reject** — Approve applies the exact plan; Reject ends
-   the run with no changes.
+3. **Create the `dev`, `test`, `prod` GitHub Environments** — add a required reviewer to at
+   least `prod`. ⚠️ An environment with no reviewer applies without pausing.
+4. **Push the code to `main`** — see [Git commands](#git-commands). Pushing does **not** deploy;
+   deploys are manual.
+5. **Run Terraform Apply** for `dev` first — Actions → Terraform Apply → Run workflow →
+   `environment=dev` → review plan → approve if gated.
+6. **Promote** to `test`, then `prod`, the same way.
 
-Quick verification before pushing:
+Quick verification before the first run:
 
 ```bash
-# Environment exists with a reviewer (needs gh CLI)
-gh api repos/rightaboutnow/terraform-learn/environments/production \
-  --jq '.name, .protection_rules'
+# Environments exist (and which are gated)
+for e in dev test prod; do
+  gh api repos/rightaboutnow/terraform-learn/environments/$e --jq '.name, .protection_rules' ; done
 
 # Actions variables are set
 gh variable list -R rightaboutnow/terraform-learn
 
-# Azure federated credential for the environment exists
+# Per-environment federated credentials exist
 az ad app federated-credential list --id "$APP_ID" \
-  --query "[?contains(subject,'environment:production')].{name:name, subject:subject}" -o table
+  --query "[?starts_with(subject,'repo:rightaboutnow/terraform-learn:environment:')].{name:name, subject:subject}" -o table
 ```
 
 ---
@@ -188,168 +189,89 @@ az ad app federated-credential list --id "$APP_ID" \
 
 ### First-time setup — initialize and push
 
-Run from the repo root. **Pushing to `main` triggers the workflow** (init + plan; apply stays
-manual).
+Run from the repo root. **Pushing does not deploy** — deploys are manual `workflow_dispatch`.
 
 ```bash
-# Initialize the local repo on the main branch
 git init -b main
-
-# Stage everything (.gitignore excludes .terraform/, state, tfplan, *.tfvars)
-git add .
-
-# First commit
-git commit -m "Terraform + GitHub Actions Azure OIDC pipeline"
-
-# Add the remote over SSH
+git add .                # .gitignore keeps state/plan out; environments/*.tfvars ARE committed
+git commit -m "Terraform + GitHub Actions Azure OIDC multi-env pipeline"
 git remote add origin git@github.com:rightaboutnow/terraform-learn.git
-
-# Push and set the upstream — this starts the Terraform workflow
 git push -u origin main
 ```
 
 ### Everyday workflow
 
 ```bash
-# Check what changed
 git status
-git diff
-
-# Stage, commit, push
-git add <files>          # or: git add -A
-git commit -m "Describe the change"
-git push                 # pushes to origin/main → runs init + plan
-```
-
-### Working on a branch (recommended for changes)
-
-```bash
-# Create and switch to a feature branch
-git switch -c feature/add-resource-group
-
-# ...edit files...
 git add -A
-git commit -m "Add resource group"
-git push -u origin feature/add-resource-group
-
-# Open a PR on GitHub, review the plan, then merge to main to deploy
+git commit -m "Describe the change"
+git push                 # pushes to origin/main; run Terraform Apply manually to deploy
 ```
 
-### Inspecting the remote
+### Working on a branch (recommended)
 
 ```bash
-# Confirm SSH identity
-ssh -T git@github.com
-
-# List branches/refs on the remote (empty output = nothing pushed yet)
-git ls-remote git@github.com:rightaboutnow/terraform-learn.git
-
-# Show configured remotes
-git remote -v
-```
-
-### Useful housekeeping
-
-```bash
-git log --oneline -10        # recent history
-git pull --rebase            # sync with remote before pushing
-git restore <file>           # discard local changes to a file
-git restore --staged <file>  # unstage a file
+git switch -c feature/add-resource
+git add -A && git commit -m "Add resource"
+git push -u origin feature/add-resource
+# Open a PR, merge to main, then run Terraform Apply for the target env
 ```
 
 ---
 
 ## Destroying resources (manual only)
 
-A separate, manual-only workflow tears down **everything** in the Terraform state:
-[.github/workflows/terraform-destroy.yml](.github/workflows/terraform-destroy.yml). It never runs on push — it's
-`workflow_dispatch` only and mirrors the deploy pipeline's **plan → approve → apply** shape so
-the teardown is reviewable, with two jobs:
+[.github/workflows/terraform-destroy.yml](.github/workflows/terraform-destroy.yml) tears down
+**everything in one environment's state**. It's `workflow_dispatch` only and mirrors the deploy
+shape — **plan-destroy → approve → destroy**:
 
-1. **Plan Destroy** — requires you to type `destroy` in the **confirm** box (aborts otherwise),
-   then runs `terraform plan -destroy` and uploads the destroy plan. Its log lists **exactly
-   which resources will be destroyed**.
-2. **Destroy** — targets the **`production`** environment, so the run **pauses for
-   required-reviewer approval** after the destroy plan. Approving applies that exact plan;
-   rejecting stops with nothing destroyed.
+1. **Plan Destroy** — pick the **environment** and type `destroy` in the **confirm** box (aborts
+   otherwise), then runs `terraform plan -destroy` and uploads the destroy plan listing exactly
+   what will be destroyed.
+2. **Destroy** — targets the selected **environment**, so it **pauses for reviewer approval** (if
+   that env is gated) before applying the destroy plan.
 
-So it's **double-gated**: the `destroy` confirm word *and* the environment approval — and the
-approver reviews the destroy plan before clicking Approve.
+**Double-gated**: the `destroy` confirm word *and* the environment approval.
 
-**Run it:** Actions → **Terraform Destroy** → Run workflow → branch `main` → set **confirm** =
-`destroy` → Run → review the **Plan Destroy** output → **Approve** when it pauses.
+**Run it:** Actions → **Terraform Destroy** → Run workflow → pick **environment** → set
+**confirm** = `destroy` → Run → review the Plan Destroy output → **Approve**.
 
 ```bash
-# Or via the GitHub CLI
-gh workflow run terraform-destroy.yml -R rightaboutnow/terraform-learn --ref main -f confirm=destroy
+gh workflow run terraform-destroy.yml -R rightaboutnow/terraform-learn --ref main \
+  -f environment=dev -f confirm=destroy
 ```
 
-It shares the deploy pipeline's `concurrency` group, so it can't run while an apply/plan is in
-flight (it queues behind it). ⚠️ Irreversible — it deletes all resources this state manages, but
-**not** the state storage account itself (that's bootstrapped outside Terraform).
-
----
-
-## Watching a run (optional, needs `gh`)
-
-```bash
-# Install + authenticate the GitHub CLI
-brew install gh
-gh auth login
-
-# Confirm the Actions variables are set before the first run
-gh variable list -R rightaboutnow/terraform-learn
-
-# List and watch workflow runs
-gh run list   -R rightaboutnow/terraform-learn
-gh run watch  -R rightaboutnow/terraform-learn
-```
+⚠️ Irreversible — deletes all resources that environment's state manages, but **not** the shared
+state storage account (bootstrapped outside Terraform).
 
 ---
 
 ## Troubleshooting
 
-### Run hangs on "Acquiring state lock. This may take a few moments…"
+### Run hangs on "Acquiring state lock…"
 
-The `azurerm` backend locks state by holding a **blob lease** on `terraform.tfstate`. If a run
-is **cancelled mid-`init`/`plan`/`apply`**, Terraform never releases the lease, so the next run
-blocks forever waiting for a lock no live process owns.
+The `azurerm` backend locks state with a **blob lease** on `learnapp-<env>.tfstate`. A run
+cancelled mid-`init`/`plan`/`apply` leaves the lease held, blocking the next run for that
+environment.
 
-**Check the lease:**
+**Check / break the lease for an environment** (e.g. `dev`):
 
 ```bash
-az storage blob show --container-name tfstate --name terraform.tfstate \
+az storage blob show --container-name tfstate --name learnapp-dev.tfstate \
   --account-name tfstate439921213 --auth-mode login \
-  --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state, lastModified:properties.lastModified}" -o json
-```
+  --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state}" -o json
 
-`leaseState: leased` / `leaseStatus: locked` with no run actively using it = stale lock.
-
-**Break it** (only releases the lock — does not modify state contents):
-
-```bash
-az storage blob lease break --container-name tfstate --blob-name terraform.tfstate \
+az storage blob lease break --container-name tfstate --blob-name learnapp-dev.tfstate \
   --account-name tfstate439921213 --auth-mode login
 ```
 
-**Or from GitHub** (no local `az` needed): run the **Unlock Terraform State** workflow
-([.github/workflows/unlock-state.yml](.github/workflows/unlock-state.yml)) — Actions → *Unlock
-Terraform State* → Run workflow → set **confirm** = `unlock`. It shows the lease state, breaks
-it, and confirms it's unlocked.
+**Or from GitHub:** run **Unlock Terraform State**
+([.github/workflows/unlock-state.yml](.github/workflows/unlock-state.yml)) → pick the
+**environment** → set **confirm** = `unlock`.
 
-Alternatively, if you have the lock ID from Terraform's error message:
-`terraform force-unlock <LOCK_ID>` (run locally against the same backend).
-
-Then **cancel the stuck GitHub run and re-run it** — it will acquire the now-free lock
-immediately. (The management-plane `az` commands above are not affected by the lock, so you can
-always run them.)
-
-> The pipeline also passes `-lock-timeout=120s` to `plan`/`apply`, so a stale lock makes a run
-> **fail after 2 minutes** with a clear error instead of hanging indefinitely.
-
-> Prevention: avoid cancelling a run while it's mid-Terraform. The workflow's
-> `concurrency: cancel-in-progress: false` queues overlapping runs rather than killing them, so
-> a stuck run holds up the queue until the lock is cleared.
+> The pipeline passes `-lock-timeout=120s`, so a stale lock fails a run after 2 minutes with a
+> clear error instead of hanging. `concurrency: cancel-in-progress: false` queues overlapping
+> runs per environment rather than killing them.
 
 ---
 
@@ -357,7 +279,7 @@ always run them.)
 
 - **No secrets stored** — client/tenant/subscription IDs are non-sensitive identifiers.
 - **Short-lived tokens** — 1-hour Azure access tokens, auto-refreshed.
-- **Scoped trust** — federated credential locked to a specific repo + branch.
-- **No storage keys** — shared-key access disabled; state blob uses Azure AD auth.
+- **Scoped trust** — each federated credential is locked to a specific repo + ref/environment.
+- **No storage keys** — shared-key access disabled; state blobs use Azure AD auth.
+- **Per-environment isolation** — separate state files, environments, and approval gates.
 - **Auditable** — all access logged in Azure AD sign-in logs under the service principal.
-</content>

@@ -83,16 +83,20 @@ az ad app federated-credential list --id "$APP_ID" \
   --query "[].{name:name, subject:subject, issuer:issuer, audiences:audiences}" -o json
 ```
 
-**Expected:** two credentials, issuer `https://token.actions.githubusercontent.com`,
+**Expected:** four credentials, issuer `https://token.actions.githubusercontent.com`,
 audience `api://AzureADTokenExchange`:
 
-| name          | subject                                                        |
-|---------------|----------------------------------------------------------------|
-| `github-main` | `repo:rightaboutnow/terraform-learn:ref:refs/heads/main`       |
-| `github-prs`  | `repo:rightaboutnow/terraform-learn:pull_request`              |
+| name              | subject                                                        |
+|-------------------|----------------------------------------------------------------|
+| `github-main`     | `repo:rightaboutnow/terraform-learn:ref:refs/heads/main`       |
+| `github-env-dev`  | `repo:rightaboutnow/terraform-learn:environment:dev`           |
+| `github-env-test` | `repo:rightaboutnow/terraform-learn:environment:test`          |
+| `github-env-prod` | `repo:rightaboutnow/terraform-learn:environment:prod`          |
 
-> `github-main` covers `push` to main **and** `workflow_dispatch` on main.
-> `github-prs` is only used if the workflow adds a `pull_request` trigger.
+> `github-main` covers the **plan** job (`workflow_dispatch` on main → subject is the main ref).
+> The **apply/destroy** jobs set `environment: <env>`, which changes the subject to
+> `…:environment:<env>` — matched by the `github-env-<env>` credentials. Without these, apply's
+> Azure login fails.
 
 ---
 
@@ -139,7 +143,16 @@ az storage container show --name "$STATE_CONTAINER" --account-name "$STATE_SA" \
 `allowBlobPublicAccess = false`, `allowSharedKeyAccess = false`, `provisioningState =
 Succeeded`; container `tfstate` returns its name (proves Azure AD data-plane access works).
 
-These must match the `backend "azurerm"` block in [versions.tf](versions.tf).
+The storage account + container must match the `backend "azurerm"` block in
+[versions.tf](versions.tf). The backend is **partial** — `key` is set per environment at init
+(`learnapp-<env>.tfstate`), so each env has its own blob:
+
+```bash
+# List per-environment state blobs (created on first apply of each env)
+az storage blob list --container-name "$STATE_CONTAINER" --account-name "$STATE_SA" \
+  --auth-mode login --query "[].name" -o tsv
+# Expect: learnapp-dev.tfstate, learnapp-test.tfstate, learnapp-prod.tfstate (as you deploy each)
+```
 
 ---
 
@@ -189,8 +202,8 @@ in the reference block above (Settings → Secrets and variables → Actions →
 | Azure | subscription / tenant | ✅ terraform-test, tenant matches |
 | Azure | app registration | ✅ github-actions-terraform |
 | Azure | service principal | ✅ exists |
-| Azure | federated credential `github-main` | ✅ matches push + dispatch on main |
-| Azure | federated credential `github-prs` | ⚠️ valid but unused (no PR trigger in workflow) |
+| Azure | federated credential `github-main` | ✅ matches dispatch on main (plan job) |
+| Azure | federated credentials `github-env-dev/test/prod` | ✅ match apply/destroy per environment |
 | Azure | RBAC Contributor (subscription) | ✅ |
 | Azure | RBAC User Access Administrator (subscription) | ✅ |
 | Azure | RBAC Storage Blob Data Contributor (storage acct) | ✅ |

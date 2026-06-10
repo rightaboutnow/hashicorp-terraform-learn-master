@@ -45,16 +45,23 @@ az ad app federated-credential create \
     "audiences": ["api://AzureADTokenExchange"]
   }'
 
-# For pull requests (optional but useful for plan-only runs)
-az ad app federated-credential create \
-  --id $APP_ID \
-  --parameters '{
-    "name": "github-prs",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':pull_request",
-    "audiences": ["api://AzureADTokenExchange"]
-  }'
+# One credential per environment. The apply/destroy jobs set
+# `environment: <env>`, which changes the OIDC subject to
+# repo:<org>/<repo>:environment:<env> — so each env needs its own credential.
+for ENV in dev test prod; do
+  az ad app federated-credential create --id $APP_ID --parameters "{
+    \"name\": \"github-env-$ENV\",
+    \"issuer\": \"https://token.actions.githubusercontent.com\",
+    \"subject\": \"repo:$GITHUB_ORG/$GITHUB_REPO:environment:$ENV\",
+    \"audiences\": [\"api://AzureADTokenExchange\"]
+  }"
+done
 ```
+
+> **Quoting note:** build the `subject` so `$GITHUB_ORG/$GITHUB_REPO` actually expands —
+> if the full `repo:.../.../environment:<env>` doesn't appear in the created credential,
+> the subject got mangled. Verify with:
+> `az ad app federated-credential list --id $APP_ID --query "[].{name:name, subject:subject}" -o table`
 
 ---
 
@@ -123,14 +130,17 @@ az role assignment create \
   --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$STATE_RG/providers/Microsoft.Storage/storageAccounts/$STATE_SA"
 ```
 
-Then put the storage account name into the backend block in `versions.tf`:
+Then put the storage account name into the backend block in `versions.tf`. Note the
+**partial backend** — `key` is omitted so each environment gets its own state file; the
+pipeline supplies it at init time:
 
 ```hcl
 backend "azurerm" {
   resource_group_name  = "tfstate-rg"
   storage_account_name = "tfstate439921213"   # <-- the $STATE_SA value from above
   container_name       = "tfstate"
-  key                  = "terraform.tfstate"
+  # key intentionally omitted (partial backend) — set per environment at init:
+  #   terraform init -backend-config="key=learnapp-dev.tfstate"
   use_oidc             = true
   use_azuread_auth     = true                # use Azure AD (not access keys) for the blob
 }
@@ -154,14 +164,16 @@ In your GitHub repo → **Settings → Secrets and Variables → Actions → Var
 
 ## Step 6: Terraform Project Files
 
-The Terraform configuration lives in the repo root as four files (skeletons to populate as you learn):
+The Terraform configuration lives in the repo root, plus per-environment tfvars:
 
-- `versions.tf` — Terraform version, `azurerm` provider, and the **remote state backend** (OIDC + Azure AD blob auth)
-- `main.tf` — your resources
-- `variables.tf` — input variables
+- `versions.tf` — Terraform/provider versions and the **partial** remote state backend
+- `main.tf` — resources + naming/tags locals
+- `variables.tf` — input variables (naming, governance, storage, networking)
 - `outputs.tf` — outputs
+- `environments/{dev,test,prod}.tfvars` — per-environment values (committed; no secrets)
 
-The backend in `versions.tf` is what wires Terraform to the blob from Step 4:
+The backend in `versions.tf` is a **partial backend** — `key` is omitted so each environment
+gets its own state file (`learnapp-<env>.tfstate`), supplied at init time:
 
 ```hcl
 # versions.tf
@@ -173,15 +185,19 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.76"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "3.9.0"
+    }
   }
 
   backend "azurerm" {
     resource_group_name  = "tfstate-rg"
     storage_account_name = "tfstate439921213" # from Step 4
     container_name       = "tfstate"
-    key                  = "terraform.tfstate"
     use_oidc             = true
     use_azuread_auth     = true
+    # key supplied at init: terraform init -backend-config="key=learnapp-<env>.tfstate"
   }
 }
 
@@ -193,23 +209,33 @@ provider "azurerm" {
 
 ---
 
-## Step 7: GitHub Actions Workflow (plan → apply)
+## Step 7: GitHub Actions Workflow (pick env → plan → apply)
 
 The pipeline lives in [.github/workflows/terraform-apply.yml](.github/workflows/terraform-apply.yml) — that
-file is the single source of truth; this section just summarizes it. It has **two jobs**:
+file is the single source of truth; this section summarizes it. It's **`workflow_dispatch`
+only** and **asks which environment** (`dev`/`test`/`prod`) to target. Two jobs:
 
-1. **Plan** — checkout → Azure OIDC login → `terraform init`, `fmt -check`, `validate`, then
-   `terraform plan -out=tfplan`, and uploads `tfplan` as an artifact. (Init/validate/plan are
-   one job since they're sequential and share state.) Runs automatically on every push to
-   `main` and on manual **Run workflow**.
-2. **Apply** — `needs: plan`, targets the **`production`** GitHub Environment, and downloads
-   the `tfplan` artifact to run `terraform apply tfplan`.
+1. **Plan** — checkout → Azure OIDC login → `terraform init -backend-config="key=learnapp-<env>.tfstate"`,
+   `fmt -check`, `validate`, then `terraform plan -var-file=environments/<env>.tfvars -out=tfplan`,
+   and uploads the plan artifact. No `environment:` on this job, so it auths with `github-main`.
+2. **Apply** — `needs: plan`, targets the **`<env>`** GitHub Environment, re-inits with the same
+   `-backend-config`, downloads the plan artifact, and runs `terraform apply tfplan`.
 
-> **Apply approval gate:** the apply job targets a `production` GitHub Environment with a required reviewer. Every run does plan, then **pauses** at apply. Open the run → **Review deployments** → **Approve and deploy** to apply the plan just generated, or **Reject** to stop — no re-run needed. This requires a one-time `production` environment (with you as reviewer) and a matching Azure federated credential for subject `repo:<org>/<repo>:environment:production`. See [README.md](README.md#choosing-whether-to-apply-the-approval-gate) for details.
+> **Per-environment approval gate:** the apply job sets `environment: <env>`. If that GitHub
+> Environment has a required reviewer (recommended at least for `prod`), the run **pauses** at
+> apply for an **Approve / Reject** click. Setting `environment: <env>` also changes the OIDC
+> subject to `repo:<org>/<repo>:environment:<env>`, matched by the `github-env-<env>` credential
+> from Step 2. Create the `dev`/`test`/`prod` environments (and reviewers) per
+> [README.md](README.md#create-the-github-environments).
 
 > **Why apply re-runs `terraform init`:** it runs on a fresh runner, so the `.terraform`
-> provider cache and backend config don't carry over from the plan job. The `tfplan` file is
-> passed from **plan → apply** as an artifact, so apply executes exactly the plan you reviewed.
+> provider cache and backend config don't carry over from the plan job. Re-init uses the same
+> `-backend-config` key, and the `tfplan` artifact is passed plan → apply so apply executes
+> exactly the plan you reviewed.
+
+The companion workflows follow the same env-choice pattern:
+[terraform-destroy.yml](.github/workflows/terraform-destroy.yml) (pick env + type `destroy`) and
+[unlock-state.yml](.github/workflows/unlock-state.yml) (pick env to break that state's lock).
 
 ---
 
@@ -236,4 +262,4 @@ file is the single source of truth; this section just summarizes it. It has **tw
 - **Scoped trust** — federated credential is locked to your specific repo + branch
 - **Auditable** — all access logged in Azure AD sign-in logs under the service principal
 
-The `subject` claim in the federated credential is what scopes the trust — you can use `environment:production`, `ref:refs/heads/main`, or `pull_request` to control exactly which GitHub Actions contexts can authenticate.
+The `subject` claim in the federated credential is what scopes the trust. This project uses `ref:refs/heads/main` (the plan jobs) and `environment:<env>` for `dev`/`test`/`prod` (the apply/destroy jobs); other forms like `pull_request` are available if you add those triggers.

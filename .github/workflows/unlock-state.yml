@@ -1,13 +1,21 @@
 name: Unlock Terraform State
 
-# Manual-only. Breaks the blob lease that the azurerm backend uses to lock
-# terraform.tfstate. Use this ONLY when a run is stuck on "Acquiring state lock"
-# and you've confirmed no run is actively using the state (a cancelled/zombie run
-# left the lease held). Breaking a lease only releases the lock — it does not
-# modify state contents.
+# Manual-only. Breaks the blob lease that the azurerm backend uses to lock the
+# SELECTED environment's state file (learnapp-<env>.tfstate). Use this ONLY when
+# a run is stuck on "Acquiring state lock" and you've confirmed no run is actively
+# using that environment's state. Breaking a lease only releases the lock — it
+# does not modify state contents.
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment whose state lock to break'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
       confirm:
         description: 'Type "unlock" to confirm you want to break the state lock.'
         type: string
@@ -17,9 +25,14 @@ permissions:
   id-token: write   # OIDC token request
   contents: read
 
+env:
+  STATE_SA: tfstate439921213
+  STATE_CONTAINER: tfstate
+  TF_ENV: ${{ inputs.environment }}
+
 jobs:
   unlock:
-    name: Break state lease
+    name: Break state lease (${{ inputs.environment }})
     runs-on: ubuntu-latest
     steps:
       - name: Verify confirmation
@@ -28,6 +41,8 @@ jobs:
           echo "::error::Set the confirm box to 'unlock' to proceed."
           exit 1
 
+      - uses: actions/checkout@v6
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -35,24 +50,37 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Resolve state blob name from tfvars
+        # application_name is the single source of truth (environments/<env>.tfvars).
+        run: |
+          tfvars="environments/${TF_ENV}.tfvars"
+          app_name=$(grep -E '^[[:space:]]*application_name[[:space:]]*=' "$tfvars" \
+            | grep -vE '^[[:space:]]*#' | head -n1 \
+            | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/')
+          if [ -z "$app_name" ]; then
+            echo "::error::application_name not found in $tfvars"; exit 1
+          fi
+          echo "STATE_BLOB=${app_name}-${TF_ENV}.tfstate" >> "$GITHUB_ENV"
+          echo "Resolved state blob: ${app_name}-${TF_ENV}.tfstate"
+
       - name: Show current lease state
         run: |
           az storage blob show \
-            --container-name tfstate --name terraform.tfstate \
-            --account-name tfstate439921213 --auth-mode login \
-            --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state, lastModified:properties.lastModified}" \
+            --container-name "$STATE_CONTAINER" --name "$STATE_BLOB" \
+            --account-name "$STATE_SA" --auth-mode login \
+            --query "{blob:name, leaseStatus:properties.lease.status, leaseState:properties.lease.state, lastModified:properties.lastModified}" \
             -o json
 
       - name: Break the lease
         run: |
           az storage blob lease break \
-            --container-name tfstate --blob-name terraform.tfstate \
-            --account-name tfstate439921213 --auth-mode login
+            --container-name "$STATE_CONTAINER" --blob-name "$STATE_BLOB" \
+            --account-name "$STATE_SA" --auth-mode login
 
       - name: Confirm unlocked
         run: |
           az storage blob show \
-            --container-name tfstate --name terraform.tfstate \
-            --account-name tfstate439921213 --auth-mode login \
-            --query "{leaseStatus:properties.lease.status, leaseState:properties.lease.state}" \
+            --container-name "$STATE_CONTAINER" --name "$STATE_BLOB" \
+            --account-name "$STATE_SA" --auth-mode login \
+            --query "{blob:name, leaseStatus:properties.lease.status, leaseState:properties.lease.state}" \
             -o json

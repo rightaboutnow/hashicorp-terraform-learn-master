@@ -1,22 +1,30 @@
 name: Terraform Destroy
 
-# Manual-only. Tears down ALL resources managed by this Terraform state.
+# Manual-only. Tears down ALL resources in the SELECTED environment's state.
 # Flow mirrors the deploy pipeline so the destruction is reviewable:
-#   plan-destroy  →  (production approval — reviewer sees exactly what will be destroyed)  →  apply
-# Double-gated: you must type the confirm word AND approve the 'production'
-# environment before any resource is destroyed.
+#   plan-destroy  →  (environment approval — reviewer sees exactly what will be destroyed)  →  destroy
+# Double-gated: you must type the confirm word AND approve the environment
+# before any resource is destroyed.
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
       confirm:
         description: 'Type "destroy" to confirm you want to destroy all managed resources.'
         type: string
         default: ""
 
-# Share the deploy pipeline's concurrency slot so destroy can't run while an
-# apply/plan run is in flight (it queues behind it).
+# Share the deploy pipeline's per-environment concurrency slot so destroy can't
+# run while an apply/plan run for the same environment is in flight.
 concurrency:
-  group: terraform-${{ github.ref }}
+  group: terraform-${{ inputs.environment }}
   cancel-in-progress: false
 
 permissions:
@@ -28,12 +36,15 @@ env:
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
   ARM_USE_OIDC: "true"
+  TF_ENV: ${{ inputs.environment }}
 
 jobs:
   # ── 1. PLAN DESTROY (no approval; produces a reviewable destroy plan) ──
   plan-destroy:
-    name: Plan Destroy
+    name: Plan Destroy (${{ inputs.environment }})
     runs-on: ubuntu-latest
+    outputs:
+      state_key: ${{ steps.ctx.outputs.state_key }}
     steps:
       - name: Verify confirmation
         if: inputs.confirm != 'destroy'
@@ -43,6 +54,20 @@ jobs:
 
       - uses: actions/checkout@v6
 
+      - name: Resolve state key from tfvars
+        id: ctx
+        # application_name is the single source of truth (environments/<env>.tfvars).
+        run: |
+          tfvars="environments/${TF_ENV}.tfvars"
+          app_name=$(grep -E '^[[:space:]]*application_name[[:space:]]*=' "$tfvars" \
+            | grep -vE '^[[:space:]]*#' | head -n1 \
+            | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/')
+          if [ -z "$app_name" ]; then
+            echo "::error::application_name not found in $tfvars"; exit 1
+          fi
+          echo "state_key=${app_name}-${TF_ENV}.tfstate" >> "$GITHUB_OUTPUT"
+          echo "Resolved app_name='${app_name}' → state key '${app_name}-${TF_ENV}.tfstate'"
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -56,29 +81,28 @@ jobs:
           terraform_version: "~1.15"
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -backend-config="key=${{ steps.ctx.outputs.state_key }}"
 
       - name: Terraform Plan (destroy)
         # Review THIS step's output before approving — it lists every resource
         # that will be destroyed.
-        run: terraform plan -destroy -no-color -lock-timeout=120s -out=tfdestroy
+        run: terraform plan -destroy -no-color -lock-timeout=120s -var-file="environments/${TF_ENV}.tfvars" -out=tfdestroy
 
       - name: Upload Destroy Plan Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tfdestroy
+          name: tfdestroy-${{ inputs.environment }}
           path: tfdestroy
           retention-days: 5
 
   # ── 2. DESTROY (waits for manual approval via the environment) ──
   destroy:
-    name: Destroy
+    name: Destroy (${{ inputs.environment }})
     runs-on: ubuntu-latest
     needs: plan-destroy
-    # The 'production' environment has a required reviewer, so this run pauses
-    # here after the destroy plan and waits for Approve/Reject — no re-run needed.
-    # Approving applies the exact destroy plan produced above.
-    environment: production
+    # The selected environment's protection rules make this run pause for
+    # approval after the destroy plan. Approving applies the exact destroy plan.
+    environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v6
 
@@ -95,12 +119,13 @@ jobs:
           terraform_version: "~1.15"
 
       - name: Terraform Init
-        run: terraform init
+        # Reuse the exact state key resolved by the plan-destroy job.
+        run: terraform init -backend-config="key=${{ needs.plan-destroy.outputs.state_key }}"
 
       - name: Download Destroy Plan Artifact
         uses: actions/download-artifact@v8
         with:
-          name: tfdestroy
+          name: tfdestroy-${{ inputs.environment }}
 
       - name: Terraform Apply (destroy plan)
         run: terraform apply -no-color -lock-timeout=120s tfdestroy
