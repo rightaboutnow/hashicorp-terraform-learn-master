@@ -99,9 +99,10 @@ The Azure/GitHub trust is provisioned once — full steps in
   - `repo:<org>/<repo>:environment:dev` — apply/destroy to dev (`github-env-dev`)
   - `repo:<org>/<repo>:environment:test` — apply/destroy to test (`github-env-test`)
   - `repo:<org>/<repo>:environment:prod` — apply/destroy to prod (`github-env-prod`)
-- **RBAC**: `Contributor` (+ `User Access Administrator` if Terraform manages role
-  assignments) on the subscription, and `Storage Blob Data Contributor` on the state storage
-  account
+- **RBAC** (subscription scope): `Contributor`, `User Access Administrator` (for
+  Terraform-managed role assignments), and `Storage Blob Data Contributor` — the last is
+  needed because resources set `shared_access_key_enabled = false` and the provider uses
+  `storage_use_azuread = true`, so it reaches the blob data plane via Azure AD
 - A **state storage account** (`tfstate439921213`) + `tfstate` container (shared-key access
   disabled → Azure AD only)
 - Three **GitHub Actions variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,

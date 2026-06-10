@@ -108,19 +108,21 @@ Management-plane roles live at subscription scope:
 az role assignment list --assignee "$SP_OBJECT_ID" --include-inherited -o table
 ```
 
-**Expected:** `Contributor` and `User Access Administrator` at
-`/subscriptions/$SUBSCRIPTION_ID`.
+**Expected:** three roles at `/subscriptions/$SUBSCRIPTION_ID`:
+- `Contributor` — management plane
+- `User Access Administrator` — for Terraform-managed role assignments
+- `Storage Blob Data Contributor` — data-plane blob access for the storage accounts Terraform
+  creates (they disable shared-key auth, and the provider uses `storage_use_azuread = true`).
+  Without it, apply fails with `403 Key based authentication is not permitted`.
 
-Data-plane blob role is scoped to the state storage account (a child scope — must query
-it explicitly, it will NOT show up in the subscription-level list above):
+There is also an older `Storage Blob Data Contributor` scoped to just the **state** storage
+account (a child scope — won't show in the subscription list above). It's now redundant with the
+subscription-scoped grant but harmless:
 
 ```bash
 SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$STATE_RG/providers/Microsoft.Storage/storageAccounts/$STATE_SA"
 az role assignment list --assignee "$SP_OBJECT_ID" --scope "$SCOPE" --include-inherited -o table
 ```
-
-**Expected:** the above two **plus** `Storage Blob Data Contributor` at the storage
-account scope (required because shared-key access is disabled → state blob auth is Azure AD only).
 
 > Note: `--all` together with `--assignee` errors on az 2.75 (`group or scope are not
 > required when --all is used`). Use `--include-inherited` / `--scope` instead, as above.
@@ -206,7 +208,7 @@ in the reference block above (Settings → Secrets and variables → Actions →
 | Azure | federated credentials `github-env-dev/test/prod` | ✅ match apply/destroy per environment |
 | Azure | RBAC Contributor (subscription) | ✅ |
 | Azure | RBAC User Access Administrator (subscription) | ✅ |
-| Azure | RBAC Storage Blob Data Contributor (storage acct) | ✅ |
+| Azure | RBAC Storage Blob Data Contributor (subscription — for created storage accounts) | ✅ |
 | Azure | storage account hardening | ✅ TLS1.2, public off, shared-key off |
 | Azure | state container (Azure AD auth) | ✅ reachable |
 | GitHub | SSH access | ✅ as rightaboutnow |

@@ -81,7 +81,21 @@ az role assignment create \
   --assignee $SP_OBJECT_ID \
   --role "User Access Administrator" \
   --scope "/subscriptions/$SUBSCRIPTION_ID"
+
+# Data-plane blob access for the storage accounts Terraform CREATES.
+# These set shared_access_key_enabled = false, so the provider must reach the
+# blob data plane via Azure AD (provider sets storage_use_azuread = true). Without
+# this role the post-create data-plane poll fails with:
+#   403 "Key based authentication is not permitted on this storage account."
+# Contributor (above) is management-plane only and does NOT grant blob data access.
+az role assignment create \
+  --assignee $SP_OBJECT_ID \
+  --role "Storage Blob Data Contributor" \
+  --scope "/subscriptions/$SUBSCRIPTION_ID"
 ```
+
+> Scope shown at the subscription so it covers every `rg-<app>-<env>` Terraform creates. For
+> tighter least-privilege you can instead assign it per resource group once the RGs exist.
 
 ---
 

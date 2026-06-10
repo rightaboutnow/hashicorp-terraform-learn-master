@@ -33,4 +33,10 @@ terraform {
 provider "azurerm" {
   features {}
   use_oidc = true
+
+  # Storage accounts here have shared-key access disabled, so the provider must
+  # use Azure AD (the OIDC identity) for blob/queue/table data-plane operations
+  # instead of account keys. Requires the principal to hold a "Storage Blob Data*"
+  # role on the accounts it manages.
+  storage_use_azuread = true
 }

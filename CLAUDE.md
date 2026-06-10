@@ -106,6 +106,12 @@ Don't run `terraform apply` locally against the real backend unless explicitly a
   storage, RBAC, federated credentials, and Actions variables (see `SETUP.md`).
 - The **state storage account** (`tfstate439921213` / RG `tfstate-rg`) is bootstrapped **outside**
   Terraform. `terraform destroy` never touches it.
+- **`403 Key based authentication is not permitted`** on storage apply = the account has
+  `shared_access_key_enabled = false`, so the provider must use Azure AD for the data plane. Two
+  requirements (both already in place): the provider sets `storage_use_azuread = true`
+  (`versions.tf`), and the deploy SP holds **Storage Blob Data Contributor** at subscription scope
+  (management-plane `Contributor` does NOT grant blob data access). New storage accounts inherit
+  this from the subscription-scoped grant.
 
 ## Safety rules for agents
 
