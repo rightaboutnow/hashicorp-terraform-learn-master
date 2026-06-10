@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #
+# Copyright (c) 2026 Jenson Thomas. All rights reserved.
+#
 # bootstrap.sh — one-time, manual bootstrap for the Terraform + GitHub Actions + Azure
 # OIDC setup. Run this once per (repo, subscription) before the deploy pipeline can work.
 # It is idempotent: every resource is created only if it does not already exist, so it's
@@ -106,13 +108,21 @@ SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
 ok "service principal object id: $SP_ID"
 
 # ── 2. Federated identity credentials (OIDC) ──────────────────────────────────
+# Credential names are repo-specific (<repo>-main, <repo>-env-<env>) so one shared
+# app can hold credentials for multiple repos — names must be unique per app.
 log "2. Federated credentials (main + per environment)"
 existing_subjects=$(az ad app federated-credential list --id "$APP_ID" --query "[].subject" -o tsv)
+existing_names=$(az ad app federated-credential list --id "$APP_ID" --query "[].name" -o tsv)
+
+# Credential-name prefix from the repo (only [a-zA-Z0-9-_] allowed in the name).
+CRED_PREFIX=$(printf '%s' "$GITHUB_REPO" | tr -c 'a-zA-Z0-9_-' '-')
 
 create_fic() {
   local name="$1" subject="$2"
   if printf '%s\n' "$existing_subjects" | grep -qxF "$subject"; then
     skip "$name → $subject"
+  elif printf '%s\n' "$existing_names" | grep -qxF "$name"; then
+    warn "credential name '$name' already exists with a different subject — skipping (delete it to recreate)"
   else
     az ad app federated-credential create --id "$APP_ID" --parameters \
       "{\"name\":\"$name\",\"issuer\":\"$ISSUER\",\"subject\":\"$subject\",\"audiences\":[\"$AUDIENCE\"]}" >/dev/null
@@ -120,9 +130,9 @@ create_fic() {
   fi
 }
 
-create_fic "github-main" "repo:$GITHUB_OWNER/$GITHUB_REPO:ref:refs/heads/main"
+create_fic "${CRED_PREFIX}-main" "repo:$GITHUB_OWNER/$GITHUB_REPO:ref:refs/heads/main"
 for env in $ENVIRONMENTS; do
-  create_fic "github-env-$env" "repo:$GITHUB_OWNER/$GITHUB_REPO:environment:$env"
+  create_fic "${CRED_PREFIX}-env-$env" "repo:$GITHUB_OWNER/$GITHUB_REPO:environment:$env"
 done
 
 # ── 3. RBAC role assignments (subscription scope) ─────────────────────────────
